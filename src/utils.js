@@ -76,14 +76,25 @@
   }
 
   /**
-   * Returns true if the given text looks like a "new listing / new shop" indicator.
+   * Turns free-form shop-age text into a whole number of months, or null if
+   * the text doesn't describe a shop age at all. "New on Etsy" and its
+   * variants are treated as month 0 - there is no separate "is new" concept,
+   * it's just the youngest possible age bucket. Never guesses: only text
+   * that actually names an age (or a "since <date>" that resolves to one)
+   * produces a non-null result.
+   *   "New on Etsy"              -> 0
+   *   "Recently listed"          -> 0
+   *   "1 month on Etsy"          -> 1
+   *   "2 months on Etsy"         -> 2
+   *   "Etsy seller for 1 month"  -> 1
+   *   "On Etsy since 2020"       -> computed from today's date
    */
-  function isNewIndicatorText(text) {
-    if (!text) return false;
+  function parseShopAgeMonths(text) {
+    if (!text) return null;
     const normalized = text.trim().toLowerCase();
-    if (!normalized) return false;
+    if (!normalized) return null;
 
-    const patterns = [
+    const newPatterns = [
       /\bnew on etsy\b/,
       /\brecently listed\b/,
       /\bnew listing\b/,
@@ -91,8 +102,47 @@
       /\bnew shop\b/,
       /^new$/,
     ];
+    if (newPatterns.some((re) => re.test(normalized))) return 0;
 
-    return patterns.some((re) => re.test(normalized));
+    const monthsMatch =
+      normalized.match(/(\d+)\s*months?\s+on etsy\b/) ||
+      normalized.match(/\betsy seller for\s+(\d+)\s*months?\b/);
+    if (monthsMatch) {
+      const months = parseInt(monthsMatch[1], 10);
+      if (!Number.isNaN(months)) return months;
+    }
+
+    const sinceMatch = normalized.match(/\bon etsy since\s+([^\n,]+)/);
+    if (sinceMatch) {
+      const months = monthsSinceDateText(sinceMatch[1]);
+      if (months !== null) return months;
+    }
+
+    return null;
+  }
+
+  /**
+   * Resolves free-form date text (e.g. "2020", "May 2020", "January 1, 2020")
+   * into a whole number of months elapsed since then. Returns null if the
+   * text can't be parsed as a date at all - never a guessed/estimated value.
+   */
+  function monthsSinceDateText(dateText) {
+    if (!dateText) return null;
+    const cleaned = dateText.trim().replace(/[.,]+$/, "");
+    if (!cleaned) return null;
+
+    let parsed = Date.parse(cleaned);
+    if (Number.isNaN(parsed)) {
+      const yearOnly = cleaned.match(/^(\d{4})$/);
+      if (yearOnly) parsed = Date.parse(`January 1, ${yearOnly[1]}`);
+    }
+    if (Number.isNaN(parsed)) return null;
+
+    const since = new Date(parsed);
+    const now = new Date();
+    let months = (now.getFullYear() - since.getFullYear()) * 12 + (now.getMonth() - since.getMonth());
+    if (now.getDate() < since.getDate()) months -= 1;
+    return Math.max(0, months);
   }
 
   /**
@@ -162,7 +212,8 @@
     debounce,
     containsSalesKeyword,
     parseSalesText,
-    isNewIndicatorText,
+    parseShopAgeMonths,
+    monthsSinceDateText,
     getCardText,
     findSalesSnippet,
     extractListingId,

@@ -3,9 +3,10 @@
  * Two storage areas are used, deliberately kept separate:
  *   - chrome.storage.sync: small user-configured filter settings, shared
  *     across the user's signed-in Chrome instances.
- *   - chrome.storage.local: the public-sales-data cache keyed by shop/listing
- *     URL. This can grow larger (one entry per fetched shop/listing) and has
- *     no reason to sync across devices, so it stays local.
+ *   - chrome.storage.local: the public-page data cache (sales + shop age)
+ *     keyed by shop/listing URL. This can grow larger (one entry per
+ *     fetched shop/listing) and has no reason to sync across devices, so it
+ *     stays local.
  * Shared by both content.js and popup.js so the shape of the settings
  * object lives in exactly one place.
  */
@@ -14,14 +15,15 @@
 
   const DEFAULT_SETTINGS = {
     enabled: true,
-    newOnEtsyOnly: false,
+    shopAgeFilter: "all", // 'all' | 'new' | '1m' | '2m'
     minSales: "",
     maxSales: "",
     hideUnavailableSales: false,
+    debugMode: false,
   };
 
   const SETTINGS_KEY = "etsyFilterSettings";
-  const SALES_CACHE_KEY = "etsyFilterSalesCache";
+  const PUBLIC_DATA_CACHE_KEY = "etsyFilterPublicDataCache";
 
   /**
    * Resolves with the saved settings merged over the defaults.
@@ -72,17 +74,19 @@
   }
 
   /**
-   * Returns the full public-sales cache: { [shopUrlOrListingUrl]: { salesCount, source, scope, fetchedAt } }
+   * Returns the full public-page data cache:
+   *   { [shopUrlOrListingUrl]: { salesCount, salesSource, salesScope,
+   *                               shopAgeMonths, shopAgeSource, fetchedAt } }
    */
-  function getSalesCache() {
+  function getPublicDataCache() {
     return new Promise((resolve) => {
       try {
-        chrome.storage.local.get(SALES_CACHE_KEY, (result) => {
+        chrome.storage.local.get(PUBLIC_DATA_CACHE_KEY, (result) => {
           if (chrome.runtime.lastError) {
             resolve({});
             return;
           }
-          resolve((result && result[SALES_CACHE_KEY]) || {});
+          resolve((result && result[PUBLIC_DATA_CACHE_KEY]) || {});
         });
       } catch (err) {
         resolve({});
@@ -94,12 +98,12 @@
    * Stores/updates a single cache entry, keyed by shop URL (preferred, since
    * it's reusable across every listing from that shop) or listing URL.
    */
-  function setCachedSalesEntry(key, entry) {
-    return getSalesCache().then((cache) => {
+  function setCachedPublicDataEntry(key, entry) {
+    return getPublicDataCache().then((cache) => {
       const merged = { ...cache, [key]: { ...entry, fetchedAt: Date.now() } };
       return new Promise((resolve) => {
         try {
-          chrome.storage.local.set({ [SALES_CACHE_KEY]: merged }, () => {
+          chrome.storage.local.set({ [PUBLIC_DATA_CACHE_KEY]: merged }, () => {
             resolve(merged[key]);
           });
         } catch (err) {
@@ -114,7 +118,7 @@
     getSettings,
     saveSettings,
     onSettingsChanged,
-    getSalesCache,
-    setCachedSalesEntry,
+    getPublicDataCache,
+    setCachedPublicDataEntry,
   };
 })(window);

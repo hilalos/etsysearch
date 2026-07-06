@@ -15,6 +15,13 @@
  *   - Style/visibility writes are batched into a single requestAnimationFrame
  *     per pass instead of being interleaved with reads.
  *
+ * Navigation model (see README): Etsy's pagination/search can change the URL
+ * and swap the results container without a full page reload. We detect that
+ * via wrapped history.pushState/replaceState, popstate/hashchange listeners,
+ * and a low-frequency polling fallback, then re-detect the results
+ * container, reconnect the observer, and reprocess the new page's listings -
+ * without losing the user's filter settings or the shop/listing data cache.
+ *
  * Depends on window.EtsyFilterUtils (utils.js) and window.EtsyFilterStorage
  * (storage.js), both loaded before this file per manifest.json ordering.
  */
@@ -24,14 +31,20 @@
   const {
     debounce,
     parseSalesText,
-    isNewIndicatorText,
+    parseShopAgeMonths,
     getCardText,
     extractListingId,
     extractListingUrl,
     extractShopInfo,
   } = window.EtsyFilterUtils || {};
-  const { getSettings, saveSettings, onSettingsChanged, getSalesCache, setCachedSalesEntry, DEFAULT_SETTINGS } =
-    window.EtsyFilterStorage || {};
+  const {
+    getSettings,
+    saveSettings,
+    onSettingsChanged,
+    getPublicDataCache,
+    setCachedPublicDataEntry,
+    DEFAULT_SETTINGS,
+  } = window.EtsyFilterStorage || {};
 
   if (!debounce || !getSettings) {
     // Dependencies failed to load; nothing we can safely do.
@@ -41,14 +54,15 @@
   const PANEL_ID = "etsy-filter-panel";
   const BADGE_CLASS = "etsy-filter-badge";
   const LIMITATION_NOTE =
-    "Etsy does not always show sales numbers on search pages. Sales data may require fetching each public listing/shop page, and may still be unavailable.";
+    "Etsy does not always show sales numbers or shop age on search pages. This data may require fetching each public listing/shop page, and may still be unavailable. Nothing here is ever invented or estimated beyond what Etsy's own public text says.";
 
   const FETCH_CONCURRENCY = 1; // polite default; see README for rationale
   const FETCH_DELAY_MS = 1200; // delay between requests, within the 800-1500ms range
+  const NAV_POLL_MS = 1000; // safety-net URL/container-health poll
 
   // Unpacked/dev-loaded extensions have no "update_url" in their manifest;
-  // Chrome Web Store installs do. This gives us a zero-config dev-mode flag
-  // for the performance logging the task asked for, with no build step.
+  // Chrome Web Store installs do. Debug logging is also always-on in that
+  // case, on top of the explicit "Debug mode" panel checkbox.
   const isDevMode = (() => {
     try {
       return !("update_url" in chrome.runtime.getManifest());
@@ -57,17 +71,18 @@
     }
   })();
 
-  function logPerf(label, data) {
-    if (!isDevMode) return;
+  function logDebug(label, data) {
+    if (!isDevMode && !currentSettings.debugMode) return;
     // eslint-disable-next-line no-console
-    console.log(`[Etsy Filter][perf] ${label}`, data);
+    console.log(`[Etsy Filter][debug] ${label}`, data);
   }
 
   let currentSettings = { ...DEFAULT_SETTINGS };
-  let inMemorySalesCache = {}; // mirrors chrome.storage.local, key -> {salesCount, source, scope}
+  let inMemoryPublicDataCache = {}; // mirrors chrome.storage.local, key -> {salesCount, salesSource, salesScope, shopAgeMonths, shopAgeSource}
   const attemptedFetchKeys = new Set(); // "do not retry repeatedly in the same session"
 
-  // card element -> { listingId, shopName, shopUrl, listingUrl, isNewOnEtsy,
+  // card element -> { listingId, listingUrl, shopName, shopUrl,
+  //                    shopAgeMonths, shopAgeSource,
   //                    salesCount, salesSource, salesScope, lastProcessedAt }
   const cardCache = new WeakMap();
   const knownCards = new Set(); // iterable companion to the WeakMap (WeakMaps aren't iterable)
@@ -77,6 +92,7 @@
   let containerObserver = null;
   let bootstrapObserver = null;
   let styleUpdateScheduled = false;
+  let lastKnownUrl = location.href;
 
   const fetchState = {
     running: false,
@@ -90,6 +106,16 @@
   function isSearchPage() {
     const path = location.pathname || "";
     return path.includes("/search") || path.includes("/market/");
+  }
+
+  function getPageNumberFromUrl() {
+    try {
+      const params = new URLSearchParams(location.search);
+      const page = parseInt(params.get("page"), 10);
+      return Number.isFinite(page) && page > 0 ? page : 1;
+    } catch (err) {
+      return 1;
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -176,41 +202,59 @@
     return texts;
   }
 
-  function detectIsNew(card) {
+  /**
+   * Scans a card's short leaf-node text (badges like "New on Etsy" or
+   * "1 month on Etsy" are usually their own small element) for a shop-age
+   * indicator. One walk serves both the "new" and "N months" cases, since
+   * they're the same underlying concept at different values.
+   */
+  function detectShopAgeFromCard(card) {
     const leafTexts = getLeafTexts(card);
-    return leafTexts.some((text) => isNewIndicatorText(text));
+    for (let i = 0; i < leafTexts.length; i++) {
+      const months = parseShopAgeMonths(leafTexts[i]);
+      if (months !== null) return months;
+    }
+    return null;
   }
 
   /**
    * Extracts everything we can learn about a card from its own (small)
    * subtree, plus anything already known for its shop/listing from the
-   * public-sales cache. Runs exactly once per card - callers must check
+   * public-data cache. Runs exactly once per card - callers must check
    * cardCache.has(card) first.
    */
   function extractCardMetadata(card) {
     const listingId = extractListingId(card);
     const listingUrl = extractListingUrl(card);
     const { shopName, shopUrl } = extractShopInfo(card);
-    const isNewOnEtsy = detectIsNew(card);
 
-    const cardText = getCardText(card);
-    const cardSales = parseSalesText(cardText);
+    const cardAge = detectShopAgeFromCard(card);
+    let shopAgeMonths = cardAge;
+    let shopAgeSource = cardAge !== null ? "card" : "unknown";
 
+    const cardSales = parseSalesText(getCardText(card));
     let salesCount = null;
     let salesSource = "unknown";
     let salesScope = null;
-
     if (cardSales !== null) {
       salesCount = cardSales;
       salesSource = "card";
       salesScope = "listing";
-    } else {
+    }
+
+    if (shopAgeSource === "unknown" || salesSource === "unknown") {
       const cacheKey = shopUrl || listingUrl;
-      const cached = cacheKey ? inMemorySalesCache[cacheKey] : null;
+      const cached = cacheKey ? inMemoryPublicDataCache[cacheKey] : null;
       if (cached) {
-        salesCount = cached.salesCount;
-        salesSource = cached.source; // 'public' | 'unavailable'
-        salesScope = cached.scope || null;
+        if (salesSource === "unknown" && cached.salesSource) {
+          salesCount = cached.salesCount;
+          salesSource = cached.salesSource;
+          salesScope = cached.salesScope || null;
+        }
+        if (shopAgeSource === "unknown" && cached.shopAgeSource) {
+          shopAgeMonths = cached.shopAgeMonths;
+          shopAgeSource = cached.shopAgeSource;
+        }
       }
     }
 
@@ -219,7 +263,8 @@
       listingUrl,
       shopName,
       shopUrl,
-      isNewOnEtsy,
+      shopAgeMonths,
+      shopAgeSource,
       salesCount,
       salesSource,
       salesScope,
@@ -256,11 +301,14 @@
       next = iterator.next();
     }
 
-    logPerf("processed batch", {
+    logDebug("processed batch", {
+      url: location.href,
+      page: getPageNumberFromUrl(),
       processed,
       skippedCached: skipped,
       ms: Math.round(performance.now() - start),
       remaining: pendingCards.size,
+      knownListings: knownCards.size,
     });
 
     scheduleStyleUpdate();
@@ -284,6 +332,20 @@
   // Style/visibility updates (batched into a single rAF per pass)
   // ---------------------------------------------------------------------
 
+  function formatShopAge(months) {
+    if (months === 0) return "New on Etsy";
+    if (months === 1) return "1 month on Etsy";
+    return `${months} months on Etsy`;
+  }
+
+  function shopAgeStatusLabel(meta) {
+    if (meta.shopAgeMonths !== null && meta.shopAgeMonths !== undefined) {
+      return `Shop age found: ${formatShopAge(meta.shopAgeMonths)}`;
+    }
+    if (meta.shopAgeSource === "unavailable") return "Shop age unavailable";
+    return "Public page fetch required";
+  }
+
   function salesStatusLabel(meta) {
     if (meta.salesCount !== null && meta.salesCount !== undefined) {
       if (meta.salesSource === "public") {
@@ -296,8 +358,9 @@
     return "Sales: not fetched yet";
   }
 
-  function annotateCard(card, meta, visible, filtersActive) {
+  function annotateCard(card, meta, visible, { shopAgeActive, salesActive }) {
     let badge = card.querySelector(`:scope > .${BADGE_CLASS}`);
+    const filtersActive = shopAgeActive || salesActive;
 
     if (!visible || !filtersActive) {
       if (badge) badge.remove();
@@ -313,13 +376,30 @@
       card.appendChild(badge);
     }
 
-    badge.textContent = `Matched by Etsy Filter · ${salesStatusLabel(meta)}`;
-    badge.title = meta.isNewOnEtsy ? "Detected as new on Etsy" : "";
+    const parts = [];
+    if (shopAgeActive) parts.push(shopAgeStatusLabel(meta));
+    if (salesActive) parts.push(salesStatusLabel(meta));
+
+    badge.textContent = `Matched by Etsy Filter · ${parts.join(" · ")}`;
+    badge.title = "";
   }
 
   function removeBadge(card) {
     const badge = card.querySelector(`:scope > .${BADGE_CLASS}`);
     if (badge) badge.remove();
+  }
+
+  function passesShopAgeFilter(meta) {
+    const filter = currentSettings.shopAgeFilter;
+    if (!filter || filter === "all") return true;
+
+    const age = meta.shopAgeMonths;
+    const known = age !== null && age !== undefined;
+
+    if (filter === "new") return known && age === 0;
+    if (filter === "1m") return known && age <= 1;
+    if (filter === "2m") return known && age <= 2;
+    return true;
   }
 
   function applyFiltersToAllKnownCards() {
@@ -336,7 +416,8 @@
     const maxSales = currentSettings.maxSales !== "" ? Number(currentSettings.maxSales) : null;
     const hasMin = minSales !== null && !Number.isNaN(minSales);
     const hasMax = maxSales !== null && !Number.isNaN(maxSales);
-    const filtersActive = currentSettings.newOnEtsyOnly || hasMin || hasMax;
+    const shopAgeActive = !!currentSettings.shopAgeFilter && currentSettings.shopAgeFilter !== "all";
+    const salesActive = hasMin || hasMax;
 
     let visibleCount = 0;
     let total = 0;
@@ -354,11 +435,11 @@
       total++;
       let visible = true;
 
-      if (currentSettings.newOnEtsyOnly && !meta.isNewOnEtsy) {
+      if (shopAgeActive && !passesShopAgeFilter(meta)) {
         visible = false;
       }
 
-      if (visible && (hasMin || hasMax)) {
+      if (visible && salesActive) {
         const salesKnown = meta.salesCount !== null && meta.salesCount !== undefined;
         if (!salesKnown) {
           visible = !currentSettings.hideUnavailableSales;
@@ -369,13 +450,20 @@
       }
 
       card.style.display = visible ? "" : "none";
-      annotateCard(card, meta, visible, filtersActive);
+      annotateCard(card, meta, visible, { shopAgeActive, salesActive });
       if (visible) visibleCount++;
     });
 
     stale.forEach((card) => knownCards.delete(card));
     updateStatus({ visible: visibleCount, total });
     updateFetchUI();
+
+    logDebug("filter pass", {
+      url: location.href,
+      page: getPageNumberFromUrl(),
+      detectedListings: total,
+      filteredVisible: visibleCount,
+    });
   }
 
   function scheduleStyleUpdate() {
@@ -388,7 +476,7 @@
   }
 
   // ---------------------------------------------------------------------
-  // Level 2: optional public-page sales enrichment (user-initiated only)
+  // Level 2: optional public-page enrichment (sales + shop age), user-initiated only
   // ---------------------------------------------------------------------
 
   function delay(ms, signal) {
@@ -408,17 +496,21 @@
   }
 
   /**
-   * Fetches a public Etsy page and looks for a visible sales count in its
-   * rendered text. Uses credentials: 'omit' deliberately - we only want
-   * whatever a logged-out visitor could see, never an authenticated view.
+   * Fetches a public Etsy page and looks for a visible sales count and/or
+   * shop-age text in its rendered text. Uses credentials: 'omit' deliberately
+   * - we only want whatever a logged-out visitor could see, never an
+   * authenticated view.
    */
-  async function fetchPublicSalesData(url, signal) {
+  async function fetchPublicPageData(url, signal) {
     const response = await fetch(url, { credentials: "omit", signal });
     if (!response.ok) throw new Error(`Request failed: ${response.status}`);
     const html = await response.text();
     const doc = new DOMParser().parseFromString(html, "text/html");
     const text = doc.body ? doc.body.textContent : html;
-    return parseSalesText(text);
+    return {
+      salesCount: parseSalesText(text),
+      shopAgeMonths: parseShopAgeMonths(text),
+    };
   }
 
   /**
@@ -426,7 +518,8 @@
    * unresolved cards - never per card. Several cards from the same shop
    * collapse into a single request, and only the currently-loaded, currently
    * visible (not hidden by our own filters), not-yet-attempted set is
-   * considered - never the whole page, never automatically.
+   * considered - never the whole page, never automatically. A single fetch
+   * is used to resolve BOTH sales and shop age at once.
    */
   function buildFetchTargets() {
     const targetMap = new Map();
@@ -435,7 +528,11 @@
       if (!document.contains(card) || card.style.display === "none") return;
 
       const meta = cardCache.get(card);
-      if (!meta || meta.salesSource !== "unknown") return;
+      if (!meta) return;
+
+      const needsSales = meta.salesSource === "unknown";
+      const needsAge = meta.shopAgeSource === "unknown";
+      if (!needsSales && !needsAge) return;
 
       const key = meta.shopUrl || meta.listingUrl;
       if (!key || attemptedFetchKeys.has(key)) return;
@@ -457,16 +554,31 @@
   async function processFetchTarget(target) {
     attemptedFetchKeys.add(target.key);
 
-    let result = inMemorySalesCache[target.key] || null;
+    let result = inMemoryPublicDataCache[target.key] || null;
     if (!result) {
       try {
-        const salesCount = await fetchPublicSalesData(target.url, fetchState.abortController.signal);
-        result = { salesCount, source: salesCount !== null ? "public" : "unavailable", scope: target.scope };
+        const { salesCount, shopAgeMonths } = await fetchPublicPageData(
+          target.url,
+          fetchState.abortController.signal
+        );
+        result = {
+          salesCount,
+          salesSource: salesCount !== null ? "public" : "unavailable",
+          salesScope: target.scope,
+          shopAgeMonths,
+          shopAgeSource: shopAgeMonths !== null ? "public" : "unavailable",
+        };
       } catch (err) {
-        result = { salesCount: null, source: "unavailable", scope: target.scope };
+        result = {
+          salesCount: null,
+          salesSource: "unavailable",
+          salesScope: target.scope,
+          shopAgeMonths: null,
+          shopAgeSource: "unavailable",
+        };
       }
-      inMemorySalesCache[target.key] = result;
-      setCachedSalesEntry(target.key, result).catch(() => {
+      inMemoryPublicDataCache[target.key] = result;
+      setCachedPublicDataEntry(target.key, result).catch(() => {
         /* best-effort persistence only */
       });
     }
@@ -479,19 +591,23 @@
 
     target.cards.forEach((card) => {
       const meta = cardCache.get(card) || {};
-      cardCache.set(card, {
-        ...meta,
-        salesCount: result.salesCount,
-        salesSource: result.source,
-        salesScope: result.scope,
-        lastProcessedAt: Date.now(),
-      });
+      const merged = { ...meta, lastProcessedAt: Date.now() };
+      if (meta.salesSource === "unknown") {
+        merged.salesCount = result.salesCount;
+        merged.salesSource = result.salesSource;
+        merged.salesScope = result.salesScope;
+      }
+      if (meta.shopAgeSource === "unknown") {
+        merged.shopAgeMonths = result.shopAgeMonths;
+        merged.shopAgeSource = result.shopAgeSource;
+      }
+      cardCache.set(card, merged);
     });
 
     scheduleStyleUpdate();
   }
 
-  async function startPublicSalesFetch() {
+  async function startPublicDataFetch() {
     if (fetchState.running) return;
 
     const targets = buildFetchTargets();
@@ -531,7 +647,7 @@
     updateFetchUI();
   }
 
-  function stopPublicSalesFetch() {
+  function stopPublicDataFetch() {
     if (!fetchState.running) return;
     fetchState.running = false;
     if (fetchState.abortController) fetchState.abortController.abort();
@@ -543,7 +659,7 @@
   // ---------------------------------------------------------------------
 
   function createPanel() {
-    if (document.getElementById(PANEL_ID)) return;
+    if (document.getElementById(PANEL_ID)) return; // never create a second panel
 
     const panel = document.createElement("div");
     panel.id = PANEL_ID;
@@ -553,10 +669,25 @@
         <button type="button" class="etsy-filter-collapse" aria-label="Collapse panel">&minus;</button>
       </div>
       <div class="etsy-filter-body">
-        <label class="etsy-filter-row etsy-filter-checkbox-row">
-          <input type="checkbox" id="etsy-filter-new-only" />
-          <span>New on Etsy only</span>
-        </label>
+        <fieldset class="etsy-filter-fieldset">
+          <legend>Shop Age Filter</legend>
+          <label class="etsy-filter-row etsy-filter-radio-row">
+            <input type="radio" name="etsy-filter-shop-age" value="all" id="etsy-filter-age-all" />
+            <span>All</span>
+          </label>
+          <label class="etsy-filter-row etsy-filter-radio-row">
+            <input type="radio" name="etsy-filter-shop-age" value="new" id="etsy-filter-age-new" />
+            <span>New on Etsy</span>
+          </label>
+          <label class="etsy-filter-row etsy-filter-radio-row">
+            <input type="radio" name="etsy-filter-shop-age" value="1m" id="etsy-filter-age-1m" />
+            <span>1 month on Etsy or newer</span>
+          </label>
+          <label class="etsy-filter-row etsy-filter-radio-row">
+            <input type="radio" name="etsy-filter-shop-age" value="2m" id="etsy-filter-age-2m" />
+            <span>2 months on Etsy or newer</span>
+          </label>
+        </fieldset>
         <label class="etsy-filter-row">
           <span>Minimum public sales</span>
           <input type="number" min="0" inputmode="numeric" id="etsy-filter-min-sales" placeholder="e.g. 50" />
@@ -574,10 +705,14 @@
           <button type="button" id="etsy-filter-reset">Reset</button>
         </div>
         <div class="etsy-filter-fetch-row">
-          <button type="button" id="etsy-filter-fetch-btn">Fetch public sales data</button>
+          <button type="button" id="etsy-filter-fetch-btn">Fetch public data</button>
           <div class="etsy-filter-fetch-progress" id="etsy-filter-fetch-progress"></div>
         </div>
         <div class="etsy-filter-status" id="etsy-filter-status" role="status"></div>
+        <label class="etsy-filter-row etsy-filter-checkbox-row etsy-filter-debug-row">
+          <input type="checkbox" id="etsy-filter-debug-mode" />
+          <span>Debug mode (console logs)</span>
+        </label>
         <div class="etsy-filter-note">${LIMITATION_NOTE}</div>
       </div>
     `;
@@ -592,10 +727,14 @@
     panel.querySelector("#etsy-filter-reset").addEventListener("click", onResetClicked);
     panel.querySelector("#etsy-filter-fetch-btn").addEventListener("click", () => {
       if (fetchState.running) {
-        stopPublicSalesFetch();
+        stopPublicDataFetch();
       } else {
-        startPublicSalesFetch();
+        startPublicDataFetch();
       }
+    });
+    panel.querySelector("#etsy-filter-debug-mode").addEventListener("change", (event) => {
+      currentSettings = { ...currentSettings, debugMode: event.target.checked };
+      saveSettings({ debugMode: event.target.checked });
     });
   }
 
@@ -603,18 +742,23 @@
     const panel = document.getElementById(PANEL_ID);
     if (!panel) return;
 
-    panel.querySelector("#etsy-filter-new-only").checked = !!currentSettings.newOnEtsyOnly;
+    const shopAgeValue = currentSettings.shopAgeFilter || "all";
+    const radio = panel.querySelector(`input[name="etsy-filter-shop-age"][value="${shopAgeValue}"]`);
+    if (radio) radio.checked = true;
+
     panel.querySelector("#etsy-filter-min-sales").value = currentSettings.minSales || "";
     panel.querySelector("#etsy-filter-max-sales").value = currentSettings.maxSales || "";
     panel.querySelector("#etsy-filter-hide-unavailable").checked = !!currentSettings.hideUnavailableSales;
+    panel.querySelector("#etsy-filter-debug-mode").checked = !!currentSettings.debugMode;
     panel.classList.toggle("etsy-filter-disabled", !currentSettings.enabled);
   }
 
   function readPanelValues() {
     const panel = document.getElementById(PANEL_ID);
     if (!panel) return {};
+    const checkedAge = panel.querySelector('input[name="etsy-filter-shop-age"]:checked');
     return {
-      newOnEtsyOnly: panel.querySelector("#etsy-filter-new-only").checked,
+      shopAgeFilter: checkedAge ? checkedAge.value : "all",
       minSales: panel.querySelector("#etsy-filter-min-sales").value.trim(),
       maxSales: panel.querySelector("#etsy-filter-max-sales").value.trim(),
       hideUnavailableSales: panel.querySelector("#etsy-filter-hide-unavailable").checked,
@@ -629,7 +773,7 @@
   }
 
   function onResetClicked() {
-    const cleared = { newOnEtsyOnly: false, minSales: "", maxSales: "", hideUnavailableSales: false };
+    const cleared = { shopAgeFilter: "all", minSales: "", maxSales: "", hideUnavailableSales: false };
     currentSettings = { ...currentSettings, ...cleared };
     syncPanelFromSettings();
     saveSettings(cleared);
@@ -658,7 +802,7 @@
 
   function updateFetchUI() {
     const btn = document.getElementById("etsy-filter-fetch-btn");
-    if (btn) btn.textContent = fetchState.running ? "Stop fetching" : "Fetch public sales data";
+    if (btn) btn.textContent = fetchState.running ? "Stop fetching" : "Fetch public data";
 
     if (fetchState.total > 0) {
       setFetchProgressText(
@@ -686,6 +830,26 @@
     // childList/subtree (no attributes/characterData) so lazy-loaded image
     // swaps and unrelated attribute churn never wake this callback.
     containerObserver.observe(container, { childList: true, subtree: true });
+    logDebug("observer reconnected", {
+      url: location.href,
+      page: getPageNumberFromUrl(),
+      containerTag: container.tagName,
+      containerId: container.id || null,
+    });
+  }
+
+  function startBootstrapObserver() {
+    if (bootstrapObserver) return; // avoid duplicate observers
+    bootstrapObserver = new MutationObserver(
+      debounce(() => {
+        const found = ensureContainer();
+        if (found) {
+          discoverNewCards(found);
+          scheduleIdleProcessing();
+        }
+      }, 300)
+    );
+    bootstrapObserver.observe(document.body, { childList: true, subtree: true });
   }
 
   /**
@@ -708,6 +872,100 @@
   }
 
   // ---------------------------------------------------------------------
+  // Navigation handling: Etsy pagination/search may change the URL and/or
+  // swap the results container without a full page reload (client-side
+  // routing). We detect that from several independent signals and re-run
+  // discovery/processing on the new page while keeping filter settings and
+  // the shop/listing data cache intact.
+  // ---------------------------------------------------------------------
+
+  function teardownForNavigation() {
+    if (containerObserver) {
+      containerObserver.disconnect();
+      containerObserver = null;
+    }
+    if (bootstrapObserver) {
+      bootstrapObserver.disconnect();
+      bootstrapObserver = null;
+    }
+    resultsContainer = null;
+    // Page-specific DOM tracking only. Deliberately NOT cleared:
+    //   - cardCache (WeakMap): old cards are simply unreachable once dropped
+    //     from knownCards, and get garbage-collected naturally.
+    //   - inMemoryPublicDataCache / attemptedFetchKeys: shop/listing facts
+    //     already learned remain valid on other pages of the same search and
+    //     should never be re-fetched.
+    //   - currentSettings: the user's filters must survive page navigation.
+    knownCards.clear();
+    pendingCards.clear();
+  }
+
+  function handleNavigationChange(forceReprocess) {
+    const urlChanged = location.href !== lastKnownUrl;
+    if (!urlChanged && !forceReprocess) return;
+
+    lastKnownUrl = location.href;
+    logDebug("navigation detected", { url: location.href, page: getPageNumberFromUrl() });
+
+    if (!isSearchPage()) {
+      teardownForNavigation();
+      const existingPanel = document.getElementById(PANEL_ID);
+      if (existingPanel) existingPanel.remove();
+      return;
+    }
+
+    teardownForNavigation();
+    createPanel(); // idempotent: re-injects only if missing
+    syncPanelFromSettings();
+
+    const container = ensureContainer();
+    if (container) {
+      discoverNewCards(container);
+      scheduleIdleProcessing();
+    } else {
+      startBootstrapObserver();
+    }
+
+    logDebug("reprocessed after navigation", {
+      url: location.href,
+      page: getPageNumberFromUrl(),
+      detectedListings: knownCards.size,
+    });
+  }
+
+  function startNavigationWatcher() {
+    const checkNow = () => {
+      const containerBroken = !!resultsContainer && !document.contains(resultsContainer);
+      handleNavigationChange(containerBroken);
+    };
+
+    // pushState/replaceState fire no native event, so we wrap them to learn
+    // about client-side route changes the instant they happen. Wrapped
+    // defensively: if another script already wrapped these (or a strict CSP
+    // blocks reassignment), we fail silently and rely on the poll below.
+    try {
+      ["pushState", "replaceState"].forEach((methodName) => {
+        const original = history[methodName];
+        if (typeof original !== "function") return;
+        history[methodName] = function wrapped(...args) {
+          const result = original.apply(this, args);
+          queueMicrotask(checkNow);
+          return result;
+        };
+      });
+    } catch (err) {
+      /* fall back to popstate/hashchange/poll below */
+    }
+
+    window.addEventListener("popstate", checkNow);
+    window.addEventListener("hashchange", checkNow);
+
+    // Safety net: catches any navigation mechanism the hooks above miss
+    // (e.g. a future Etsy routing approach), at a low, cheap frequency.
+    setInterval(checkNow, NAV_POLL_MS);
+  }
+
+  // ---------------------------------------------------------------------
   // Init
   // ---------------------------------------------------------------------
 
@@ -721,9 +979,9 @@
     }
 
     try {
-      inMemorySalesCache = await getSalesCache();
+      inMemoryPublicDataCache = await getPublicDataCache();
     } catch (err) {
-      inMemorySalesCache = {};
+      inMemoryPublicDataCache = {};
     }
 
     createPanel();
@@ -738,17 +996,10 @@
       // observer on document.body just to notice when results appear; it
       // disconnects itself the moment ensureContainer() finds a scoped
       // container, so it never runs for the lifetime of the page.
-      bootstrapObserver = new MutationObserver(
-        debounce(() => {
-          const found = ensureContainer();
-          if (found) {
-            discoverNewCards(found);
-            scheduleIdleProcessing();
-          }
-        }, 300)
-      );
-      bootstrapObserver.observe(document.body, { childList: true, subtree: true });
+      startBootstrapObserver();
     }
+
+    startNavigationWatcher();
 
     onSettingsChanged((newSettings) => {
       currentSettings = newSettings;

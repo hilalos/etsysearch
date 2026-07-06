@@ -78,6 +78,39 @@
   gap: 8px;
 }
 
+.etsy-filter-fieldset {
+  border: 1px solid #e2ddd6;
+  border-radius: 8px;
+  padding: 8px 10px 10px;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.etsy-filter-fieldset legend {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 0 4px;
+}
+
+.etsy-filter-radio-row {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.etsy-filter-row input[type="radio"] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+}
+
+.etsy-filter-debug-row {
+  padding-top: 4px;
+  border-top: 1px solid #eee;
+}
+
 .etsy-filter-row input[type="number"] {
   width: 100%;
   padding: 6px 8px;
