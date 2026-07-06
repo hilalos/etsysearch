@@ -1,6 +1,14 @@
 /**
  * utils.js
  * Pure helper functions shared by content.js.
+ *
+ * Important correction baked into this module: Etsy does not expose a
+ * per-product sales count anywhere public. Every "N sales" figure visible
+ * on Etsy (on a search card, a listing page, or a shop page) is the SHOP's
+ * running total, not that one product's. Every function here that detects
+ * a sales number is named/documented accordingly - there is no per-listing
+ * sales concept anywhere in this codebase.
+ *
  * No DOM mutation happens here - only reading/parsing small, already-scoped
  * strings/elements (a single listing card, a single anchor). Callers are
  * responsible for never handing this module a large container or the whole
@@ -25,15 +33,18 @@
   }
 
   /**
-   * Cheap pre-check so callers can skip the full parseSalesText regex when a
-   * card obviously has no sales-related text at all.
+   * Cheap pre-check so callers can skip the full parseShopTotalSales regex
+   * when a card obviously has no sales-related text at all.
    */
-  function containsSalesKeyword(text) {
+  function containsShopSalesKeyword(text) {
     return !!text && /sales|ventes/i.test(text);
   }
 
   /**
-   * Parses free-form sales text into an integer, or null if unavailable.
+   * Parses free-form text into the shop's total sales count, or null if
+   * unavailable. This is always the SHOP's all-time total (the only sales
+   * figure Etsy ever publicly shows), never a per-product number - Etsy does
+   * not expose that anywhere public, and this codebase never estimates it.
    * Supports English and French listings:
    *   "1,234 sales"   -> 1234
    *   "123 sales"     -> 123
@@ -43,12 +54,12 @@
    *   "1 234 ventes"  -> 1234
    * Never guesses/estimates - returns null whenever no matching text is found.
    */
-  function parseSalesText(text) {
-    if (!containsSalesKeyword(text)) return null;
+  function parseShopTotalSales(text) {
+    if (!containsShopSalesKeyword(text)) return null;
 
     // Normalize non-breaking spaces (common in French-locale Etsy pages) to
     // plain spaces so the group-separator pattern below can match them.
-    const cleaned = text.replace(/ /g, " ");
+    const cleaned = text.replace(/ /g, " ");
 
     // group1: the integer part, allowing "," or " " as thousands separators
     // group2: optional decimal digits (e.g. the "5" in "2.5k")
@@ -146,22 +157,102 @@
   }
 
   /**
+   * Rating parser for a SHORT, already-isolated leaf of text (e.g. one leaf
+   * node from a card's own subtree). Anchored to the whole string, so a
+   * leaf that is just "4.8" is trusted as a rating - short isolated leaves
+   * next to a shop/listing link are a strong signal on Etsy's cards, where
+   * the star icon itself is a graphic with no accompanying text.
+   * Constrained to a plausible 1.0-5.0 range. Returns null otherwise.
+   */
+  function parseRatingFromLeafText(text) {
+    if (!text) return null;
+    const normalized = text.trim();
+    if (!normalized) return null;
+    const match = normalized.match(/^([1-5](?:\.\d)?)\s*(?:out of 5\s*stars?|stars?)?$/i);
+    if (!match) return null;
+    const value = parseFloat(match[1]);
+    if (Number.isNaN(value) || value < 1 || value > 5) return null;
+    return value;
+  }
+
+  /**
+   * Rating parser for a large, unstructured page of text (e.g. a fetched
+   * listing/shop page's full body text). Unlike the leaf-text variant, this
+   * requires explicit "out of 5" / "stars" context, since a bare decimal
+   * floating in a large blob of text (prices, dimensions, etc.) is not a
+   * trustworthy signal on its own.
+   */
+  function parseRatingFromPageText(text) {
+    if (!text) return null;
+    const match = text.match(/\b([1-5](?:\.\d)?)\s*(?:out of 5\s*stars?|stars?)\b/i);
+    if (!match) return null;
+    const value = parseFloat(match[1]);
+    if (Number.isNaN(value) || value < 1 || value > 5) return null;
+    return value;
+  }
+
+  /**
+   * Reviews-count parser for a short, already-isolated leaf of text, e.g.
+   * "(31)", "31 reviews", "(1,234 reviews)". Anchored to the whole string.
+   * The bare "(31)" form (no "reviews" word) is Etsy's most common card-level
+   * presentation - it appears right next to the star rating.
+   */
+  function parseReviewsCountFromLeafText(text) {
+    if (!text) return null;
+    const normalized = text.trim();
+    if (!normalized) return null;
+
+    const match =
+      normalized.match(/^\(([\d,]+)\)$/) ||
+      normalized.match(/^\(([\d,]+)\s*reviews?\)$/i) ||
+      normalized.match(/^([\d,]+)\s*reviews?$/i);
+    if (!match) return null;
+
+    const value = parseInt(match[1].replace(/,/g, ""), 10);
+    return Number.isNaN(value) ? null : value;
+  }
+
+  /**
+   * Reviews-count parser for a large, unstructured page of text. Requires
+   * the word "reviews" nearby, since a bare parenthetical number is too
+   * ambiguous in a full page of text.
+   */
+  function parseReviewsCountFromPageText(text) {
+    if (!text) return null;
+    const match = text.match(/([\d,]+)\s*reviews\b/i);
+    if (!match) return null;
+    const value = parseInt(match[1].replace(/,/g, ""), 10);
+    return Number.isNaN(value) ? null : value;
+  }
+
+  /**
+   * Returns true if the text names a digital/downloadable product. Works
+   * equally well on a short card leaf or a full fetched page, since it
+   * always requires one of a small set of specific phrases (no bare-word
+   * matching that could misfire on unrelated text).
+   */
+  function isDigitalIndicatorText(text) {
+    if (!text) return false;
+    const normalized = text.trim().toLowerCase();
+    if (!normalized) return false;
+    const patterns = [
+      /\bdigital download\b/,
+      /\binstant download\b/,
+      /\bdigital file\b/,
+      /\bdigital product\b/,
+      /\bdownloadable\b/,
+      /\bprintable\b/,
+    ];
+    return patterns.some((re) => re.test(normalized));
+  }
+
+  /**
    * Returns a card's own textContent. Callers must only ever pass a single,
    * already-scoped listing card element here - never a results container or
    * document.body - since textContent walks the entire subtree.
    */
   function getCardText(card) {
     return card.textContent || "";
-  }
-
-  /**
-   * Finds the first substring in `text` that matches a "sales" pattern and
-   * returns the raw matched snippet (useful for display), or null.
-   */
-  function findSalesSnippet(text) {
-    if (!containsSalesKeyword(text)) return null;
-    const match = text.match(/([\d,\s]+(?:\.\d+)?\s*[km]?\+?\s*(?:sales|ventes))/i);
-    return match ? match[0].trim() : null;
   }
 
   /**
@@ -185,11 +276,36 @@
   }
 
   /**
+   * Best-effort listing title extraction: prefers an aria-label/title
+   * attribute on the listing anchor (Etsy commonly sets one of these for
+   * accessibility, often with the fuller, non-truncated title), then a
+   * heading-like descendant, then falls back to the anchor's own text.
+   */
+  function extractListingTitle(card) {
+    const anchor = card.querySelector('a[href*="/listing/"]');
+    if (!anchor) return null;
+
+    const ariaLabel = anchor.getAttribute("aria-label");
+    if (ariaLabel && ariaLabel.trim()) return ariaLabel.trim();
+
+    const titleAttr = anchor.getAttribute("title");
+    if (titleAttr && titleAttr.trim()) return titleAttr.trim();
+
+    const heading = anchor.querySelector('h2, h3, [class*="title" i]');
+    if (heading && heading.textContent && heading.textContent.trim()) {
+      return heading.textContent.trim();
+    }
+
+    const text = anchor.textContent && anchor.textContent.trim();
+    return text || null;
+  }
+
+  /**
    * Extracts shop name + canonical shop URL from a card, if a shop link is
    * visible on it. Many listing cards link to the shop (e.g. in a "by
-   * ShopName" byline), which lets us cache shop-level sales data once and
-   * reuse it across every card from that same shop instead of fetching per
-   * listing.
+   * ShopName" byline), which lets us cache shop-level data (total sales,
+   * age, rating, reviews) once and reuse it across every card from that
+   * same shop instead of fetching per listing.
    */
   function extractShopInfo(card) {
     const anchor = card.querySelector('a[href*="/shop/"]');
@@ -210,14 +326,19 @@
 
   global.EtsyFilterUtils = {
     debounce,
-    containsSalesKeyword,
-    parseSalesText,
+    containsShopSalesKeyword,
+    parseShopTotalSales,
     parseShopAgeMonths,
     monthsSinceDateText,
+    parseRatingFromLeafText,
+    parseRatingFromPageText,
+    parseReviewsCountFromLeafText,
+    parseReviewsCountFromPageText,
+    isDigitalIndicatorText,
     getCardText,
-    findSalesSnippet,
     extractListingId,
     extractListingUrl,
+    extractListingTitle,
     extractShopInfo,
   };
 })(window);

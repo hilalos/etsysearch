@@ -3,10 +3,10 @@
  * Two storage areas are used, deliberately kept separate:
  *   - chrome.storage.sync: small user-configured filter settings, shared
  *     across the user's signed-in Chrome instances.
- *   - chrome.storage.local: the public-page data cache (sales + shop age)
- *     keyed by shop/listing URL. This can grow larger (one entry per
- *     fetched shop/listing) and has no reason to sync across devices, so it
- *     stays local.
+ *   - chrome.storage.local: the public-page data cache (shop total sales,
+ *     shop age, rating, reviews count) keyed by shop/listing URL. This can
+ *     grow larger (one entry per fetched shop/listing) and has no reason to
+ *     sync across devices, so it stays local.
  * Shared by both content.js and popup.js so the shape of the settings
  * object lives in exactly one place.
  */
@@ -15,10 +15,13 @@
 
   const DEFAULT_SETTINGS = {
     enabled: true,
-    shopAgeFilter: "all", // 'all' | 'new' | '1m' | '2m'
-    minSales: "",
-    maxSales: "",
-    hideUnavailableSales: false,
+    shopAgeFilter: "all", // 'all' | 'new' | '1m' | '2m' | '3m' | '6m' (maximum shop age)
+    digitalOnly: false,
+    minRating: "",
+    minReviews: "",
+    minShopTotalSales: "",
+    minSalesVelocity: "",
+    hideUnavailableData: false,
     debugMode: false,
   };
 
@@ -75,8 +78,13 @@
 
   /**
    * Returns the full public-page data cache:
-   *   { [shopUrlOrListingUrl]: { salesCount, salesSource, salesScope,
-   *                               shopAgeMonths, shopAgeSource, fetchedAt } }
+   *   { [shopUrlOrListingUrl]: { shopTotalSales, shopTotalSalesSource,
+   *                               shopAgeMonths, shopAgeSource,
+   *                               rating, ratingSource,
+   *                               reviewsCount, reviewsSource, fetchedAt } }
+   * Every field here is shop-level (the shop's all-time sales total, the
+   * shop's age, the shop's overall rating/review count) - never a
+   * per-product figure, since Etsy doesn't expose one publicly.
    */
   function getPublicDataCache() {
     return new Promise((resolve) => {

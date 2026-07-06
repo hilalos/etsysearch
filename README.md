@@ -1,46 +1,106 @@
 # Etsy Advanced Search Filter
 
-A Chrome extension (Manifest V3) that adds advanced filtering to Etsy
-search result pages: a **Shop Age Filter** (New on Etsy / 1 month / 2
-months or newer) and a public-sales-count range filter, using only
-publicly visible page data - and it keeps working across pagination, not
-just on the first results page.
+A Chrome extension (Manifest V3) that scans Etsy search result pages for
+public shop/listing metadata - shop total sales, shop age, rating, reviews,
+and digital-product status - and lets you filter listings by it, plus a
+derived **sales velocity** and **opportunity score**. It uses only
+publicly visible page data, keeps working across pagination, and never
+calculates or invents a per-product sales figure (Etsy doesn't expose one).
+
+## Important: what this extension does NOT do
+
+**Etsy does not publicly expose a per-product sales count anywhere.**
+Every "N sales" figure this extension ever detects - on a search card, a
+listing page, or a shop page - is the **shop's all-time running total**,
+never a specific product's. This extension:
+
+- Never calculates or estimates sales for an individual product.
+- Never invents a shop total, shop age, rating, or review count that isn't
+  literally present in Etsy's own public text.
+- Never scrapes private/internal Etsy APIs - only `fetch()` against normal
+  public page URLs, opt-in, rate-limited (see below).
+
+## Scanned fields
+
+For each listing card, the scanner extracts (when visible):
+
+| Field | Example | Scope |
+|---|---|---|
+| Listing title | "Handmade Ceramic Mug" | per listing |
+| Listing URL | `/listing/12345/...` | per listing |
+| Shop name | "CoolCeramicsShop" | per shop |
+| Shop URL | `/shop/CoolCeramicsShop` | per shop |
+| Rating | `4.8` | shop-wide |
+| Reviews count | `(31)` | shop-wide |
+| Shop total sales | `260 sales` | shop-wide |
+| Shop age | `3 months on Etsy` / `New on Etsy` | shop-wide |
+| Digital product | Yes/No | per listing |
+
+Rating and reviews count are treated as shop-wide stats (matching how
+Etsy's own star-rating badge on a search card reflects the shop's overall
+rating, not a single listing's) - so, like shop total sales and shop age,
+they're cached and reused across every card from the same shop.
+
+## Derived metrics
+
+**Sales velocity** (approximate sales per day since the shop opened):
+
+```
+salesVelocity = shopTotalSales / shopAgeDays
+```
+
+`shopAgeDays` is approximated as `shopAgeMonths * 30` (matching the worked
+example: 3 months ≈ 90 days). Example: a shop with `260 sales` and
+`3 months on Etsy` → `260 / 90 = 2.88 sales/day`. If either shopTotalSales
+or shopAgeDays is unknown, or the shop is brand new (`0` elapsed days,
+i.e. "New on Etsy"), velocity is shown as unavailable/"too new to
+calculate" rather than a fabricated or divide-by-zero number.
+
+**Opportunity score**: a heuristic (not an official Etsy metric) combining
+sales velocity, rating, reviews count, and digital-product status, meant
+to surface shops that are relatively young but already showing traction:
+
+```
+opportunityScore =
+    salesVelocity * 10
+  + (rating - 3) * 5        // 0 if rating unknown
+  + log10(reviewsCount+1)*3 // 0 if reviews unknown
+  + (isDigital ? 5 : 0)
+```
+
+Only computed when `salesVelocity` itself is available (rating/reviews/
+digital are optional modifiers that default to a neutral 0 contribution
+when unknown). This formula is intentionally transparent and adjustable -
+treat it as a starting point, not a definitive ranking.
 
 ## Features
 
-- Floating filter panel injected on Etsy search / market pages, and kept
+- Floating filter panel injected on Etsy search / market pages, kept
   working across **pagination** (page 1, 2, 3, next/previous, and direct
   `?page=N` URLs), whether Etsy navigates with a full page reload or a
   client-side (SPA-style) transition
-- **Shop Age Filter**: All / New on Etsy / 1 month on Etsy or newer / 2
-  months on Etsy or newer
-  - Level 1 (automatic, free): parsed from any age text already visible on
-    the search-result card (`New on Etsy`, `1 month on Etsy`, `2 months on
-    Etsy`, `Etsy seller for 1 month`, `On Etsy since <date>`, etc.)
-  - Level 2 (opt-in, on click only): the same **Fetch public data** button
-    used for sales also looks for shop-age text on the fetched page
-- **Minimum public sales** / **Maximum public sales** range filter
-  - Level 1 (automatic, free): parsed straight from any sales text already
-    visible on the search-result card (English `123 sales` / `1,234 sales`
-    / `10k sales` / `2.5k sales`, and French `123 ventes` / `1 234 ventes`)
-  - Level 2 (opt-in, on click only): a **Fetch public data** button that
-    visits the public listing/shop page for cards where no sales number
-    was visible on the card itself, and looks for one there
-- **Hide listings with unavailable sales** checkbox, so you decide whether
-  unresolved listings stay visible (default) or get filtered out. (Shop-age
-  buckets other than "All" always exclude unknown ages by definition - see
-  [Filtering logic](#how-shop-age-and-sales-filtering-works) below.)
+- **Maximum Shop Age** filter: All / New on Etsy / 1 / 2 / 3 / 6 months or newer
+- **Digital products only** checkbox
+- **Minimum rating**, **minimum reviews**, **minimum shop total sales**,
+  **minimum sales/day velocity** filters
+- **Hide listings with unavailable data** checkbox for the four minimum
+  filters above (shop age always excludes unknowns once a bucket other
+  than "All" is picked - see [Filtering logic](#filtering-logic))
+- A compact per-card **scanner overlay** (shown whenever any filter above
+  is active) displaying shop name, product title, rating/reviews, shop
+  total sales, shop age, sales/day velocity, digital status, and
+  opportunity score
 - Live status line showing how many listings are visible after filtering,
-  plus a fetch-progress line ("Fetched 6 / 40 visible listings — Sales
+  plus a fetch-progress line ("Fetched 6 / 40 visible listings — Data
   found: 12, Unavailable: 28")
 - Automatically re-applies filters as new listings load in via infinite
-  scroll or pagination, without ever rescanning listings it has already
-  processed
+  scroll or pagination, without ever rescanning listings already processed
 - **Debug mode** checkbox for console logging of navigation, processing,
-  and filtering events (see [Debug mode](#debug-mode) below)
-- Settings persist via `chrome.storage.sync`; fetched public data (sales +
-  shop age) is cached in `chrome.storage.local` so the same shop/listing is
-  never re-fetched, even across pagination or a later visit
+  and filtering events
+- Settings persist via `chrome.storage.sync`; fetched public data (shop
+  total sales, shop age, rating, reviews) is cached in
+  `chrome.storage.local` so the same shop is never re-fetched, even across
+  pagination or a later visit
 - Toolbar popup to enable/disable the extension and jump to Etsy search
 
 ## Installation (Chrome developer mode)
@@ -58,16 +118,17 @@ just on the first results page.
    or a market page like `https://www.etsy.com/market/handmade_jewelry`.
 2. A floating **Etsy Advanced Filter** panel appears in the top-right
    corner of the page.
-3. Optionally pick a **Shop Age Filter** bucket, and/or enter a **Minimum
-   public sales** / **Maximum public sales** value, and decide whether to
-   check **Hide listings with unavailable sales**.
+3. Pick a **Maximum Shop Age** bucket, and/or set **Digital products
+   only**, **Minimum rating**, **Minimum reviews**, **Minimum shop total
+   sales**, and/or **Minimum sales/day velocity**. Decide whether to check
+   **Hide listings with unavailable data**.
 4. Click **Apply Filters**. Non-matching listings are hidden
-   (`display: none`); matching listings stay in place and get a small
-   "Matched by Etsy Filter" label showing their shop-age/sales status.
-5. If you want more listings to have data, click **Fetch public data**.
-   This visits the public listing/shop page for currently visible listings
-   still missing sales and/or shop-age data, one at a time with a pause
-   between each (see [Ethical usage](#ethical-usage--rate-limiting)
+   (`display: none`); matching listings stay in place and get a compact
+   scanner overlay with all of the fields above.
+5. If you want more listings to have complete data, click **Fetch public
+   data**. This visits the public shop (or listing) page for currently
+   visible listings still missing shop-level data, one at a time with a
+   pause between each (see [Ethical usage](#ethical-usage--rate-limiting)
    below). Click **Stop fetching** to cancel at any point.
 6. Click **Reset** to clear all filters and show every listing again.
 7. Go to page 2, page 3, or click next/previous - the panel and your
@@ -106,65 +167,70 @@ On any detected change, the extension:
 4. Reprocesses and re-filters the new page's listings automatically -
    there's no need to click **Apply Filters** again.
 
-## How shop-age and sales filtering works
+## How detection works
 
-Etsy search result cards usually do **not** show a shop's age or a sales
-count at all - typically only the shop name, price, and rating are
-visible there. This extension never invents or estimates either value; it
-only surfaces data that is actually present somewhere in publicly visible
-Etsy text.
-
-### Shop age
+Etsy search result cards usually do **not** show a shop's total sales,
+age, rating, or review count in full - visibility varies by card and
+listing. This extension never invents or estimates any of these; it only
+surfaces data that is actually present somewhere in publicly visible Etsy
+text.
 
 **Level 1 - fast, automatic, local:** each listing card's short badge-like
-text snippets are scanned for phrases like `New on Etsy`, `Recently
-listed`, `1 month on Etsy`, `2 months on Etsy`, `Etsy seller for 1 month`,
-or `On Etsy since <date>` (in which case the age is computed in months
-from today's date). This normalizes to a whole number of months
-(`New on Etsy` = 0), or stays unknown ("Public page fetch required") if no
-such text is found on the card.
+text snippets are scanned once (a single pass over the card's leaf text
+nodes) for:
+
+- Shop age: `New on Etsy`, `Recently listed`, `1 month on Etsy`,
+  `2 months on Etsy`, `Etsy seller for 1 month`, `On Etsy since <date>`
+  (age computed in months from today's date)
+- Rating: a short leaf that is itself just a number 1-5 (with or without
+  "out of 5 stars"/"stars"), e.g. `4.8`
+- Reviews count: `(31)`, `31 reviews`, `(1,234 reviews)`
+- Digital product: `Digital Download`, `Instant Download`, `Digital File`,
+  `Printable`, etc.
+
+Separately, the card's full text is scanned for shop total sales
+(`123 sales`, `1,234 sales`, `10k sales`, `2.5k sales`, and the French
+equivalents `123 ventes` / `1 234 ventes`), normalizing shorthand
+(`10k` → `10000`, `2.5k` → `2500`).
 
 **Level 2 - opt-in, public-page enrichment:** clicking **Fetch public
-data** looks for the same phrases on the fetched public listing/shop page.
-
-**Filtering logic:**
-
-- **All**: shows every listing regardless of age.
-- **New on Etsy**: shows only listings with a known age of exactly 0 months.
-- **1 month on Etsy or newer**: shows listings with a known age `<= 1` month.
-- **2 months on Etsy or newer**: shows listings with a known age `<= 2` months.
-
-Listings with an unknown age are always excluded once you pick anything
-other than "All" - there is no "show unavailable anyway" option for shop
-age, since a shop's age being unknown means the extension genuinely cannot
-tell whether it belongs in that bucket.
-
-### Sales
-
-**Level 1 - fast, automatic, local:** every listing card's own text is
-scanned once for a sales pattern (`123 sales`, `1,234 sales`, `10k sales`,
-`2.5k sales`, and the French equivalents `123 ventes` / `1 234 ventes`).
-Shorthand is normalized (`10k` → `10000`, `2.5k` → `2500`, `1,234` → `1234`,
-`1 234` → `1234`). If the card itself has no such text, the listing is
-marked **"Sales: not fetched yet"**.
-
-**Level 2 - opt-in, public-page enrichment:** the same **Fetch public
-data** click that looks for shop age also searches the fetched page for a
-sales pattern. If found, it's labeled **"Sales: N (public page)"**; a
-shop-page number is labeled **"shop total, public page"** since it
-reflects the shop's total sales, not necessarily that one listing. If
-nothing matching is found, the listing is labeled **"Sales: unavailable"**
-and is not retried again in the same browsing session.
-
-Unlike shop age, sales has an explicit **Hide listings with unavailable
-sales** checkbox: unresolved listings stay visible by default when a sales
-range is set, and only get hidden if you turn that on.
+data** fetches the shop page (preferred, since it's reusable across every
+card from that shop) or the listing page, and searches its text for the
+same four shop-level facts (shop total sales, shop age, rating, reviews
+count) using patterns that require more context than the card-level
+versions (e.g. rating requires "out of 5"/"stars" nearby, since a bare
+decimal in a full page of text is not a trustworthy signal on its own).
+**Digital-product detection is intentionally Level-1 only** - it is not
+re-checked via fetch, because doing so would mean a request for nearly
+every physical-goods listing (the vast majority of Etsy), which conflicts
+with the "don't scrape aggressively" requirement. If a card's own text
+doesn't show a digital indicator, it's treated as not-digital.
 
 Listing "cards" and shop/listing URLs are identified by locating anchor
 links that point to `/listing/<id>/...` and `/shop/<name>` and walking up
 to the nearest natural container (`<li>` element or a few parent levels
 up), rather than relying on Etsy's CSS class names, which can change
 without notice.
+
+## Filtering logic
+
+- **Maximum Shop Age**:
+  - **All**: shows every listing regardless of age.
+  - **New on Etsy**: shows only listings with a known age of exactly 0 months.
+  - **1/2/3/6 months or newer**: shows listings with a known age `<=` that
+    many months.
+  - Listings with an unknown age are always excluded once you pick
+    anything other than "All" - there's no "show unavailable anyway"
+    option for shop age, since an unknown age means the extension
+    genuinely cannot tell whether it belongs in that bucket.
+- **Digital products only**: shows only listings where a digital indicator
+  was found on the card.
+- **Minimum rating / minimum reviews / minimum shop total sales / minimum
+  sales/day velocity**: each hides listings below the threshold. When the
+  underlying value is unknown, the listing is hidden only if **Hide
+  listings with unavailable data** is checked; otherwise it stays visible
+  (labeled as unavailable) so you're not silently losing listings the
+  extension simply hasn't resolved yet.
 
 ## Performance improvements
 
@@ -181,15 +247,14 @@ the user changed pages. The current version fixes this with:
   observer on `document.body` handles the brief window before Etsy has
   rendered any results yet, then disconnects itself once the real
   container is found - and reconnects automatically to a fresh container
-  whenever pagination replaces it (see
-  [Pagination and dynamic navigation](#pagination-and-dynamic-navigation)).
-- **Per-card caching**: each card's detected data (`listingId`, `shopName`,
-  `shopUrl`, `shopAgeMonths`, `shopAgeSource`, `salesCount`,
-  `salesSource`, `lastProcessedAt`) is stored in a `WeakMap` keyed by the
-  card element. A card is only ever scanned once - later mutations
-  elsewhere on the page never re-trigger detection on cards already in the
-  cache, and cards that scroll (or page) out of the DOM are
-  garbage-collected automatically along with their cache entry.
+  whenever pagination replaces it.
+- **Per-card caching**: each card's detected data (listing title/URL, shop
+  name/URL, shop age, shop total sales, rating, reviews, digital status,
+  `lastProcessedAt`) is stored in a `WeakMap` keyed by the card element. A
+  card is only ever scanned once - later mutations elsewhere on the page
+  never re-trigger detection on cards already in the cache, and cards that
+  scroll (or page) out of the DOM are garbage-collected automatically
+  along with their cache entry.
 - **Debounced, idle-time processing**: mutation bursts are debounced
   (~200-300ms), and the actual scan/detection work runs inside
   `requestIdleCallback` (falling back to `setTimeout` if unavailable) so it
@@ -198,15 +263,19 @@ the user changed pages. The current version fixes this with:
 - **Batched style writes**: visibility/badge updates for all known cards
   are grouped into a single `requestAnimationFrame` callback per filtering
   pass, instead of writing styles interleaved with reads.
-- **Scoped text scans only**: `textContent` is only ever read from a single
-  listing card - never from the results container or `document.body` -
-  and only leaf-node text under 40 characters is checked for shop-age
-  badges, so detection stays proportional to one card's size, not the
-  whole page.
+- **Scoped text scans only**: leaf-node text (under 40 characters) is
+  scanned per-card in a single tree walk for shop age, rating, reviews,
+  and digital status together; the whole-card text is scanned separately
+  (and only once) for shop total sales. Neither ever touches the results
+  container or `document.body`.
 - **Cheap navigation detection**: the pushState/replaceState hooks and
   popstate/hashchange listeners are near-instant and add no polling
   overhead; the fallback safety-net poll only compares a URL string and
   checks one element's DOM membership once per second.
+- **Derived metrics computed on read, not cached**: sales velocity and
+  opportunity score depend on fields that can change after a public-data
+  fetch resolves, so they're recomputed cheaply each filter pass instead
+  of risking a stale cached value.
 
 ## Debug mode
 
@@ -235,48 +304,50 @@ The optional public-page fetch is designed to be conservative:
   listings already hidden by your own filters.
 - **Deduplicated by shop.** Multiple listings from the same shop collapse
   into a single request to that shop's page, instead of one request per
-  listing - and that one request resolves both sales and shop age at once.
+  listing - and that one request resolves shop total sales, shop age,
+  rating, and reviews all at once.
 - **One request at a time** (configurable up to 2), with a **1.2 second
   pause** between requests - deliberately slow, not a bulk scrape.
 - **No retries within a session** - once a shop/listing has been checked
   (found or unavailable), it won't be re-fetched again until you reload
   the page.
-- **Persistently cached** in `chrome.storage.local`, so once a shop/listing
-  has been checked, it's never fetched again on future visits, pages, or
+- **Persistently cached** in `chrome.storage.local`, so once a shop has
+  been checked, it's never fetched again on future visits, pages, or
   searches either.
 - **No credentials sent**: fetches use `credentials: 'omit'`, so only
   whatever a logged-out visitor could publicly see is ever read.
 - **Stoppable** at any time via the **Stop fetching** button.
+- **No re-fetching for digital-product detection** - that stays Level-1
+  (card-only) specifically to avoid a request for nearly every listing.
 - Uses only `fetch()` against normal public Etsy page URLs - no private
   APIs, no paid third-party APIs, no headless browsing, no CAPTCHA
   bypassing.
 
 ## Limitations
 
-**Etsy does not always show sales numbers or shop age on search pages.**
-Both depend on publicly visible text, which may require fetching each
-public listing/shop page, and may still be unavailable even then. In that
-case:
-
-- Shop age is shown as **"Public page fetch required"** until fetched, or
-  **"Shop age unavailable"** if fetching found nothing. Picking any Shop
-  Age Filter bucket other than "All" excludes these automatically.
-- Sales is shown as **"not fetched yet"** or **"unavailable"**; whether
-  unresolved listings stay visible when a sales range is set is controlled
-  by the separate **Hide listings with unavailable sales** checkbox.
-- The extension **never invents or estimates** a sales number or shop age
-  that isn't actually present in the page.
-- A sales number found on a shop page reflects that **shop's total
-  sales**, not necessarily sales of the specific listing you're looking
-  at - the badge and status labels always say which is which.
-
-Additionally:
-
+- Shop total sales, shop age, rating, and reviews count are shown as
+  **"not fetched yet"** / **"unavailable"** when Etsy doesn't expose them
+  on the card and a public-data fetch hasn't resolved them (or found
+  nothing). The extension **never invents or estimates** any of these.
+- Sales velocity and opportunity score are only computable once shop total
+  sales and shop age are both known and the shop isn't brand new (0
+  elapsed days) - otherwise they're shown as unavailable/"too new to
+  calculate", never a divide-by-zero or guessed number.
+- **There is no per-product sales figure anywhere in this extension.**
+  Etsy does not expose one publicly, and no formula here attempts to
+  derive or approximate one from a shop's total.
+- The opportunity score is a transparent heuristic combining sales
+  velocity, rating, reviews, and digital status - it is **not** an
+  official Etsy metric, and its weights are a starting point you may want
+  to adjust for your own use case.
+- Rating and reviews count are treated as shop-wide figures. If a specific
+  listing has meaningfully different stats from its shop's overall
+  numbers, this extension won't distinguish that.
 - The extension only activates on Etsy search (`/search`) and market
   (`/market/...`) pages.
-- Etsy's page structure can change at any time; shop-age and sales
-  detection rely on visible text patterns and may miss badges that use
-  wording not covered by the current patterns.
+- Etsy's page structure can change at any time; all detection relies on
+  visible text patterns and may miss badges that use wording not covered
+  by the current patterns.
 - The navigation-detection hooks (pushState/replaceState wrapping) are
   defensive/best-effort; if they somehow miss a particular navigation, the
   1-second fallback poll still catches it shortly after.
@@ -290,14 +361,14 @@ Additionally:
 /manifest.json       Manifest V3 configuration
 /src/content.js       Injected on Etsy search pages: panel UI, scoped observation,
                        pagination/navigation detection, caching/idle processing,
-                       and the public-data (sales + shop age) fetch queue
-/src/utils.js         Pure parsing/detection helpers (sales text, shop-age text,
-                       debounce, listing/shop URL extraction)
+                       derived-metrics computation, and the public-data fetch queue
+/src/utils.js         Pure parsing/detection helpers (shop total sales, shop age,
+                       rating, reviews, digital indicator, debounce, URL extraction)
 /src/storage.js       chrome.storage.sync (settings) + chrome.storage.local (public data cache)
 /src/popup.html       Toolbar popup markup
 /src/popup.js         Toolbar popup logic
 /src/popup.css        Toolbar popup styling
-/src/styles.css       Styles for the injected filter panel and match badges
+/src/styles.css       Styles for the injected filter panel and scanner overlay
 /icons/               Extension icons (16/48/128px)
 ```
 
