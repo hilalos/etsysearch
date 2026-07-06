@@ -15,6 +15,7 @@
   const toggle = document.getElementById("enable-toggle");
   const statusEl = document.getElementById("popup-status");
   const openBtn = document.getElementById("open-etsy-btn");
+  const openDashboardBtn = document.getElementById("open-dashboard-btn");
 
   function isEtsySearchUrl(url) {
     return !!url && ETSY_ACTIVE_PATTERN.test(url);
@@ -45,6 +46,10 @@
 
     openBtn.addEventListener("click", () => {
       chrome.tabs.create({ url: ETSY_SEARCH_URL });
+    });
+
+    openDashboardBtn.addEventListener("click", () => {
+      chrome.tabs.create({ url: chrome.runtime.getURL("src/dashboard.html") });
     });
   }
 

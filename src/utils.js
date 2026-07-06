@@ -61,6 +61,11 @@
     // plain spaces so the group-separator pattern below can match them.
     const cleaned = text.replace(/ /g, " ");
 
+    // Leading (?<![a-zA-Z0-9]) stops the number from starting mid-token - e.g.
+    // a shop name ending in a digit ("MyShop2") sitting right before the real
+    // figure would otherwise glue onto it across the intervening whitespace,
+    // since group1 below (correctly) treats whitespace as a thousands
+    // separator for French-style grouping like "1 234 ventes".
     // group1: the integer part, allowing "," or " " as thousands separators
     // group2: optional decimal digits (e.g. the "5" in "2.5k")
     // group3: optional k/m shorthand suffix
@@ -68,7 +73,7 @@
     // overlapping/adjacent numbers elsewhere in the text are never confused
     // with this one).
     const match = cleaned.match(
-      /(\d[\d,\s]*)(?:\.(\d+))?\s*(k|m)?\s*(?=\+?\s*(?:sales|ventes)\b)/i
+      /(?<![a-zA-Z0-9])(\d[\d,\s]*)(?:\.(\d+))?\s*(k|m)?\s*(?=\+?\s*(?:sales|ventes)\b)/i
     );
     if (!match) return null;
 
@@ -219,7 +224,7 @@
    */
   function parseReviewsCountFromPageText(text) {
     if (!text) return null;
-    const match = text.match(/([\d,]+)\s*reviews\b/i);
+    const match = text.match(/(?<![a-zA-Z0-9])([\d,]+)\s*reviews\b/i);
     if (!match) return null;
     const value = parseInt(match[1].replace(/,/g, ""), 10);
     return Number.isNaN(value) ? null : value;
@@ -324,6 +329,276 @@
     return { shopName, shopUrl: url };
   }
 
+  // -----------------------------------------------------------------------
+  // Document-agnostic card discovery + extraction. Every function below only
+  // uses standard DOM traversal (closest/querySelectorAll/parentElement),
+  // which works identically on the live page document AND on a detached
+  // document produced by `new DOMParser().parseFromString(html, "text/html")`
+  // - so the same logic drives both the live floating-panel scanner
+  // (content.js) and the research engine's fetched-page analysis (research.js).
+  // -----------------------------------------------------------------------
+
+  /**
+   * Finds the "card" container for a listing anchor without relying on
+   * Etsy's (frequently changing) class names. We anchor on the stable
+   * /listing/<id>/ URL pattern instead and walk up to the nearest <li>,
+   * falling back to a fixed number of parent hops.
+   */
+  function resolveCardFromAnchor(anchor) {
+    const li = anchor.closest("li");
+    if (li) return li;
+
+    let el = anchor;
+    for (let i = 0; i < 3 && el.parentElement; i++) {
+      el = el.parentElement;
+    }
+    return el;
+  }
+
+  /**
+   * Scans any root node (a live results container, or a fetched/parsed
+   * document's body) for listing anchors and returns the deduplicated set
+   * of card elements.
+   */
+  function extractListingCardsFromRoot(root) {
+    if (!root || typeof root.querySelectorAll !== "function") return [];
+    const anchors = root.querySelectorAll('a[href*="/listing/"]');
+    const cards = new Set();
+    anchors.forEach((anchor) => {
+      const card = resolveCardFromAnchor(anchor);
+      if (card) cards.add(card);
+    });
+    return Array.from(cards);
+  }
+
+  /**
+   * Collects short leaf-node text snippets inside a card (badges like
+   * "New on Etsy", "4.8", "(31)", or "Digital Download" are each usually
+   * their own small element).
+   */
+  function getLeafTexts(card) {
+    const doc = card.ownerDocument || document;
+    const texts = [];
+    const walker = doc.createTreeWalker(card, NodeFilter.SHOW_ELEMENT, null);
+    let node = walker.currentNode;
+    let visited = 0;
+    while (node && visited < 250) {
+      if (node.children.length === 0) {
+        const text = (node.textContent || "").trim();
+        if (text && text.length <= 40) texts.push(text);
+      }
+      node = walker.nextNode();
+      visited++;
+    }
+    return texts;
+  }
+
+  /**
+   * Scans a card's short leaf-node text once for shop age, rating, reviews
+   * count, and a digital-product indicator. One tree walk covers all four,
+   * instead of four separate passes over the same card.
+   */
+  function detectCardLevelSignals(card) {
+    const leafTexts = getLeafTexts(card);
+    let shopAgeMonths = null;
+    let rating = null;
+    let reviewsCount = null;
+    let isDigital = false;
+
+    for (let i = 0; i < leafTexts.length; i++) {
+      const text = leafTexts[i];
+      if (shopAgeMonths === null) {
+        const months = parseShopAgeMonths(text);
+        if (months !== null) shopAgeMonths = months;
+      }
+      if (rating === null) {
+        const r = parseRatingFromLeafText(text);
+        if (r !== null) rating = r;
+      }
+      if (reviewsCount === null) {
+        const rv = parseReviewsCountFromLeafText(text);
+        if (rv !== null) reviewsCount = rv;
+      }
+      if (!isDigital && isDigitalIndicatorText(text)) isDigital = true;
+    }
+
+    return { shopAgeMonths, rating, reviewsCount, isDigital };
+  }
+
+  /**
+   * Extracts everything we can learn about a card from its own (small)
+   * subtree, plus anything already known for its shop from `shopDirectory`
+   * (an object keyed by shopUrl/listingUrl - see storage.js). Runs exactly
+   * once per card; callers scanning a live, ever-growing page should check
+   * their own cache before calling this again for the same card.
+   * Digital-product detection is always card-level only - see README.
+   */
+  function extractCardMetadata(card, shopDirectory) {
+    const listingId = extractListingId(card);
+    const listingUrl = extractListingUrl(card);
+    const listingTitle = extractListingTitle(card);
+    const { shopName, shopUrl } = extractShopInfo(card);
+
+    const cardSignals = detectCardLevelSignals(card);
+
+    let shopAgeMonths = cardSignals.shopAgeMonths;
+    let shopAgeSource = shopAgeMonths !== null ? "card" : "unknown";
+
+    let rating = cardSignals.rating;
+    let ratingSource = rating !== null ? "card" : "unknown";
+
+    let reviewsCount = cardSignals.reviewsCount;
+    let reviewsSource = reviewsCount !== null ? "card" : "unknown";
+
+    const cardSales = parseShopTotalSales(getCardText(card));
+    let shopTotalSales = cardSales;
+    let shopTotalSalesSource = cardSales !== null ? "card" : "unknown";
+
+    const anyUnknown =
+      shopAgeSource === "unknown" ||
+      ratingSource === "unknown" ||
+      reviewsSource === "unknown" ||
+      shopTotalSalesSource === "unknown";
+
+    if (anyUnknown && shopDirectory) {
+      const cacheKey = shopUrl || listingUrl;
+      const cached = cacheKey ? shopDirectory[cacheKey] : null;
+      if (cached) {
+        if (shopTotalSalesSource === "unknown" && cached.shopTotalSalesSource) {
+          shopTotalSales = cached.shopTotalSales;
+          shopTotalSalesSource = cached.shopTotalSalesSource;
+        }
+        if (shopAgeSource === "unknown" && cached.shopAgeSource) {
+          shopAgeMonths = cached.shopAgeMonths;
+          shopAgeSource = cached.shopAgeSource;
+        }
+        if (ratingSource === "unknown" && cached.ratingSource) {
+          rating = cached.rating;
+          ratingSource = cached.ratingSource;
+        }
+        if (reviewsSource === "unknown" && cached.reviewsSource) {
+          reviewsCount = cached.reviewsCount;
+          reviewsSource = cached.reviewsSource;
+        }
+      }
+    }
+
+    return {
+      listingId,
+      listingUrl,
+      listingTitle,
+      shopName,
+      shopUrl,
+      shopAgeMonths,
+      shopAgeSource,
+      shopTotalSales,
+      shopTotalSalesSource,
+      rating,
+      ratingSource,
+      reviewsCount,
+      reviewsSource,
+      isDigital: cardSignals.isDigital,
+      lastProcessedAt: Date.now(),
+    };
+  }
+
+  const DAYS_PER_MONTH = 30; // matches the worked example: 3 months ~= 90 days
+
+  /**
+   * salesVelocity = shopTotalSales / shopAgeDays (shopAgeDays ~= shopAgeMonths * 30).
+   * Returns null when either input is unknown, or when shopAgeDays is 0 (a
+   * brand-new "New on Etsy" shop) - a shop with ~0 elapsed days has no
+   * meaningful velocity yet, and this never divides by zero or fabricates one.
+   * opportunityScore is a transparent per-shop heuristic combining velocity,
+   * rating, reviews, and digital status - see README for the exact formula
+   * and its rationale; it is not an official Etsy metric.
+   */
+  function computeDerivedMetrics(meta) {
+    const shopAgeDays =
+      meta.shopAgeMonths !== null && meta.shopAgeMonths !== undefined
+        ? meta.shopAgeMonths * DAYS_PER_MONTH
+        : null;
+
+    const hasSales = meta.shopTotalSales !== null && meta.shopTotalSales !== undefined;
+    const hasAgeDays = shopAgeDays !== null && shopAgeDays > 0;
+    const salesVelocity = hasSales && hasAgeDays ? meta.shopTotalSales / shopAgeDays : null;
+
+    const digitalScore = meta.isDigital ? 1 : 0;
+
+    let opportunityScore = null;
+    if (salesVelocity !== null) {
+      const ratingComponent =
+        meta.rating !== null && meta.rating !== undefined ? (meta.rating - 3) * 5 : 0;
+      const reviewsComponent =
+        meta.reviewsCount !== null && meta.reviewsCount !== undefined
+          ? Math.log10(meta.reviewsCount + 1) * 3
+          : 0;
+      const digitalComponent = digitalScore * 5;
+      opportunityScore = salesVelocity * 10 + ratingComponent + reviewsComponent + digitalComponent;
+    }
+
+    return { shopAgeDays, salesVelocity, digitalScore, opportunityScore };
+  }
+
+  /**
+   * Best-effort extraction of the search-results count Etsy shows near the
+   * top of a search page (e.g. "12,000 results"). Returns null if no such
+   * text is found - never guessed.
+   */
+  function extractResultCountFromDocument(doc) {
+    if (!doc || !doc.body) return null;
+    const text = doc.body.textContent || "";
+    const match = text.match(/([\d,]+)\+?\s*results?\b/i);
+    if (!match) return null;
+    const value = parseInt(match[1].replace(/,/g, ""), 10);
+    return Number.isNaN(value) ? null : value;
+  }
+
+  /**
+   * Etsy does not offer a documented public autocomplete API, so keyword
+   * discovery instead uses this: any "related search" style query link
+   * Etsy renders directly on a real, public search-results page (anchors
+   * pointing to /search?q=...) is a genuine, publicly-visible suggested
+   * phrase. Short, phrase-like link text only; the original query itself is
+   * excluded. This is 100% public-page text, never a private/internal API.
+   */
+  function extractRelatedSearchSuggestions(doc, excludeQuery) {
+    if (!doc || typeof doc.querySelectorAll !== "function") return [];
+    const anchors = Array.from(doc.querySelectorAll('a[href*="/search?q="], a[href*="/search/?q="]'));
+    const excludeNormalized = (excludeQuery || "").trim().toLowerCase();
+    const seen = new Set();
+    const suggestions = [];
+
+    anchors.forEach((anchor) => {
+      const text = (anchor.textContent || "").trim();
+      if (!text || text.length > 60) return;
+      const normalized = text.toLowerCase();
+      if (normalized === excludeNormalized || seen.has(normalized)) return;
+      seen.add(normalized);
+      suggestions.push(text);
+    });
+
+    return suggestions.slice(0, 20);
+  }
+
+  const TITLE_STOPWORDS = new Set([
+    "the", "a", "an", "and", "or", "for", "with", "of", "to", "in", "on", "by",
+    "your", "my", "is", "are", "this", "that", "set", "you", "our",
+  ]);
+
+  /**
+   * Tokenizes a listing title into lowercase words for pattern-frequency
+   * analysis, dropping very short words and common stopwords.
+   */
+  function tokenizeTitleWords(title) {
+    if (!title) return [];
+    return title
+      .toLowerCase()
+      .split(/[^a-z0-9']+/i)
+      .map((word) => word.trim())
+      .filter((word) => word.length >= 3 && !TITLE_STOPWORDS.has(word));
+  }
+
   global.EtsyFilterUtils = {
     debounce,
     containsShopSalesKeyword,
@@ -340,5 +615,14 @@
     extractListingUrl,
     extractListingTitle,
     extractShopInfo,
+    resolveCardFromAnchor,
+    extractListingCardsFromRoot,
+    getLeafTexts,
+    detectCardLevelSignals,
+    extractCardMetadata,
+    computeDerivedMetrics,
+    extractResultCountFromDocument,
+    extractRelatedSearchSuggestions,
+    tokenizeTitleWords,
   };
 })(window);

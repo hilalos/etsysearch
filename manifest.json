@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Etsy Advanced Search Filter",
-  "version": "1.0.0",
-  "description": "Adds advanced filtering (New on Etsy, sales range) to Etsy search result pages.",
+  "name": "Etsy Opportunity Finder",
+  "version": "2.0.0",
+  "description": "Finds new, fast-growing digital-product Etsy shops: live search-page filtering plus a keyword research dashboard, using only public Etsy data.",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",

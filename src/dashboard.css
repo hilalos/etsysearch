@@ -1,0 +1,272 @@
+/* dashboard.css - the Etsy Opportunity Finder research dashboard page */
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color: #222222;
+  background: #f7f5f2;
+}
+
+.dash-header {
+  background: #f56400;
+  color: #ffffff;
+  padding: 20px 24px;
+}
+
+.dash-header h1 {
+  margin: 0 0 4px;
+  font-size: 20px;
+}
+
+.dash-subtitle {
+  margin: 0;
+  font-size: 13px;
+  opacity: 0.95;
+}
+
+.dash-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 24px;
+  background: #ffffff;
+  border-bottom: 1px solid #e2ddd6;
+  overflow-x: auto;
+}
+
+.dash-tab {
+  padding: 12px 16px;
+  border: none;
+  background: transparent;
+  font-size: 14px;
+  font-weight: 600;
+  color: #666666;
+  cursor: pointer;
+  border-bottom: 3px solid transparent;
+  white-space: nowrap;
+}
+
+.dash-tab:hover {
+  color: #222222;
+}
+
+.dash-tab.active {
+  color: #f56400;
+  border-bottom-color: #f56400;
+}
+
+.dash-content {
+  padding: 20px 24px 48px;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.dash-panel {
+  display: none;
+}
+
+.dash-panel.active {
+  display: block;
+}
+
+.dash-panel h2 {
+  font-size: 15px;
+  margin: 24px 0 10px;
+}
+
+.dash-card {
+  background: #ffffff;
+  border: 1px solid #e2ddd6;
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.dash-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+
+.dash-field input[type="text"] {
+  font-weight: normal;
+  padding: 8px 10px;
+  border: 1px solid #d5d0c8;
+  border-radius: 6px;
+  font-size: 14px;
+  max-width: 320px;
+}
+
+.dash-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.dash-button {
+  padding: 8px 14px;
+  border-radius: 6px;
+  border: 1px solid #d5d0c8;
+  background: #ffffff;
+  color: #222222;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.dash-button:hover {
+  background: #f5f2ee;
+}
+
+.dash-button.primary {
+  background: #222222;
+  color: #ffffff;
+  border-color: #222222;
+}
+
+.dash-button.primary:hover {
+  background: #000000;
+}
+
+.dash-progress {
+  margin-top: 10px;
+  font-size: 12px;
+  color: #444444;
+  min-height: 16px;
+}
+
+.dash-note {
+  font-size: 12px;
+  color: #666666;
+  line-height: 1.5;
+  margin: 8px 0 0;
+}
+
+.dash-note code {
+  background: #f0ede8;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+
+.dash-stat-row {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.dash-stat-card {
+  flex: 1;
+  background: #ffffff;
+  border: 1px solid #e2ddd6;
+  border-radius: 10px;
+  padding: 16px;
+  text-align: center;
+}
+
+.dash-stat-value {
+  font-size: 28px;
+  font-weight: 700;
+  color: #f56400;
+}
+
+.dash-stat-label {
+  font-size: 12px;
+  color: #666666;
+  margin-top: 4px;
+}
+
+.dash-table-wrap {
+  overflow-x: auto;
+  background: #ffffff;
+  border: 1px solid #e2ddd6;
+  border-radius: 10px;
+}
+
+.dash-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.dash-table th,
+.dash-table td {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid #f0ede8;
+  white-space: nowrap;
+}
+
+.dash-table th {
+  background: #faf8f5;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #666666;
+}
+
+.dash-table tbody tr:hover {
+  background: #faf8f5;
+}
+
+.dash-table a {
+  color: #f56400;
+}
+
+.dash-save-btn,
+.dash-unsave-btn {
+  padding: 4px 8px;
+  border-radius: 5px;
+  border: 1px solid #d5d0c8;
+  background: #ffffff;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.dash-save-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.dash-opportunity-list {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.dash-opportunity-list li {
+  margin-bottom: 12px;
+}
+
+.dash-opportunity-keyword {
+  font-weight: 700;
+  font-size: 15px;
+}
+
+.dash-opportunity-score {
+  font-size: 13px;
+  color: #f56400;
+  font-weight: 600;
+}
+
+.dash-opportunity-reason {
+  font-size: 12px;
+  color: #666666;
+}
+
+.dash-pattern-list {
+  background: #ffffff;
+  border: 1px solid #e2ddd6;
+  border-radius: 10px;
+  padding: 12px 12px 12px 28px;
+  font-size: 13px;
+}
+
+.dash-pattern-list li {
+  margin-bottom: 6px;
+}

@@ -2,16 +2,17 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Etsy Advanced Search Filter</title>
+    <title>Etsy Opportunity Finder</title>
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
     <main class="popup">
       <header class="popup-header">
-        <h1>Etsy Advanced Search Filter</h1>
+        <h1>Etsy Opportunity Finder</h1>
         <p class="popup-description">
-          Adds a "New on Etsy" filter and a sales-count range filter to Etsy
-          search result pages.
+          Filters live Etsy search pages by shop age, sales, rating, and digital
+          status - and opens a research dashboard for keyword discovery and
+          shop scouting.
         </p>
       </header>
 
@@ -28,13 +29,16 @@
 
       <section class="popup-section">
         <button type="button" id="open-etsy-btn" class="popup-button">Open Etsy Search</button>
+        <button type="button" id="open-dashboard-btn" class="popup-button popup-button-secondary">
+          Open Research Dashboard
+        </button>
       </section>
 
       <footer class="popup-footer">
         <p>
-          Sales filtering depends on publicly visible sales data. If Etsy does
-          not display sales numbers on the search page, the extension cannot
-          calculate them accurately.
+          All data comes from Etsy's own public pages - shop total sales, shop
+          age, rating, and reviews. Nothing is invented, and there is no
+          per-product sales figure anywhere (Etsy doesn't expose one).
         </p>
       </footer>
     </main>

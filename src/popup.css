@@ -82,6 +82,17 @@ body {
   background: #000000;
 }
 
+.popup-button-secondary {
+  background: #ffffff;
+  color: #222222;
+  border: 1px solid #d5d0c8;
+  margin-top: 8px;
+}
+
+.popup-button-secondary:hover {
+  background: #f5f2ee;
+}
+
 .popup-footer {
   padding: 10px 16px 14px;
 }

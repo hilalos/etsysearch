@@ -40,23 +40,18 @@
     debounce,
     parseShopTotalSales,
     parseShopAgeMonths,
-    parseRatingFromLeafText,
     parseRatingFromPageText,
-    parseReviewsCountFromLeafText,
     parseReviewsCountFromPageText,
-    isDigitalIndicatorText,
-    getCardText,
-    extractListingId,
-    extractListingUrl,
-    extractListingTitle,
-    extractShopInfo,
+    resolveCardFromAnchor,
+    extractCardMetadata,
+    computeDerivedMetrics,
   } = window.EtsyFilterUtils || {};
   const {
     getSettings,
     saveSettings,
     onSettingsChanged,
-    getPublicDataCache,
-    setCachedPublicDataEntry,
+    getShopDirectory,
+    upsertShopDirectoryEntries,
     DEFAULT_SETTINGS,
   } = window.EtsyFilterStorage || {};
 
@@ -73,7 +68,7 @@
   const FETCH_CONCURRENCY = 1; // polite default; see README for rationale
   const FETCH_DELAY_MS = 1200; // delay between requests, within the 800-1500ms range
   const NAV_POLL_MS = 1000; // safety-net URL/container-health poll
-  const DAYS_PER_MONTH = 30; // matches the worked example: 3 months ~= 90 days
+  const DIRECTORY_FLUSH_DEBOUNCE_MS = 1500; // batch shop-directory writes, not one per card
 
   // Unpacked/dev-loaded extensions have no "update_url" in their manifest;
   // Chrome Web Store installs do. Debug logging is also always-on in that
@@ -93,10 +88,10 @@
   }
 
   let currentSettings = { ...DEFAULT_SETTINGS };
-  // Mirrors chrome.storage.local, key (shopUrl or listingUrl) -> shop-level facts:
-  // { shopTotalSales, shopTotalSalesSource, shopAgeMonths, shopAgeSource,
-  //   rating, ratingSource, reviewsCount, reviewsSource }
-  let inMemoryPublicDataCache = {};
+  // Mirrors chrome.storage.local's Shop Directory, key (shopUrl or listingUrl)
+  // -> shop-level facts: { shopTotalSales, shopTotalSalesSource, shopAgeMonths,
+  // shopAgeSource, rating, ratingSource, reviewsCount, reviewsSource, ... }
+  let inMemoryShopDirectory = {};
   const attemptedFetchKeys = new Set(); // "do not retry repeatedly in the same session"
 
   // card element -> {
@@ -142,24 +137,9 @@
 
   // ---------------------------------------------------------------------
   // Card discovery (scoped, never touches the whole document per pass)
+  // resolveCardFromAnchor/extractCardMetadata/computeDerivedMetrics live in
+  // utils.js now, shared with research.js's fetched-page analysis.
   // ---------------------------------------------------------------------
-
-  /**
-   * Finds the "card" container for a listing anchor without relying on
-   * Etsy's (frequently changing) class names. We anchor on the stable
-   * /listing/<id>/ URL pattern instead and walk up to the nearest <li>,
-   * falling back to a fixed number of parent hops.
-   */
-  function resolveCardFromAnchor(anchor) {
-    const li = anchor.closest("li");
-    if (li) return li;
-
-    let el = anchor;
-    for (let i = 0; i < 3 && el.parentElement; i++) {
-      el = el.parentElement;
-    }
-    return el;
-  }
 
   /**
    * Locates the smallest common ancestor of every currently-visible listing
@@ -205,176 +185,12 @@
   }
 
   // ---------------------------------------------------------------------
-  // Per-card detection (only ever runs once per card - result is cached)
-  // ---------------------------------------------------------------------
-
-  function getLeafTexts(card) {
-    const texts = [];
-    const walker = document.createTreeWalker(card, NodeFilter.SHOW_ELEMENT, null);
-    let node = walker.currentNode;
-    let visited = 0;
-    while (node && visited < 250) {
-      if (node.children.length === 0) {
-        const text = (node.textContent || "").trim();
-        if (text && text.length <= 40) texts.push(text);
-      }
-      node = walker.nextNode();
-      visited++;
-    }
-    return texts;
-  }
-
-  /**
-   * Scans a card's short leaf-node text once for shop age, rating, reviews
-   * count, and a digital-product indicator - badges like "New on Etsy",
-   * "4.8", "(31)", or "Digital Download" are each usually their own small
-   * element. One tree walk covers all four, instead of four separate passes
-   * over the same card.
-   */
-  function detectCardLevelSignals(card) {
-    const leafTexts = getLeafTexts(card);
-    let shopAgeMonths = null;
-    let rating = null;
-    let reviewsCount = null;
-    let isDigital = false;
-
-    for (let i = 0; i < leafTexts.length; i++) {
-      const text = leafTexts[i];
-      if (shopAgeMonths === null) {
-        const months = parseShopAgeMonths(text);
-        if (months !== null) shopAgeMonths = months;
-      }
-      if (rating === null) {
-        const r = parseRatingFromLeafText(text);
-        if (r !== null) rating = r;
-      }
-      if (reviewsCount === null) {
-        const rv = parseReviewsCountFromLeafText(text);
-        if (rv !== null) reviewsCount = rv;
-      }
-      if (!isDigital && isDigitalIndicatorText(text)) isDigital = true;
-    }
-
-    return { shopAgeMonths, rating, reviewsCount, isDigital };
-  }
-
-  /**
-   * Extracts everything we can learn about a card from its own (small)
-   * subtree, plus anything already known for its shop/listing from the
-   * public-data cache. Runs exactly once per card - callers must check
-   * cardCache.has(card) first. Digital-product detection is card-level
-   * only (never re-fetched) - see README for why.
-   */
-  function extractCardMetadata(card) {
-    const listingId = extractListingId(card);
-    const listingUrl = extractListingUrl(card);
-    const listingTitle = extractListingTitle(card);
-    const { shopName, shopUrl } = extractShopInfo(card);
-
-    const cardSignals = detectCardLevelSignals(card);
-
-    let shopAgeMonths = cardSignals.shopAgeMonths;
-    let shopAgeSource = shopAgeMonths !== null ? "card" : "unknown";
-
-    let rating = cardSignals.rating;
-    let ratingSource = rating !== null ? "card" : "unknown";
-
-    let reviewsCount = cardSignals.reviewsCount;
-    let reviewsSource = reviewsCount !== null ? "card" : "unknown";
-
-    const cardSales = parseShopTotalSales(getCardText(card));
-    let shopTotalSales = cardSales;
-    let shopTotalSalesSource = cardSales !== null ? "card" : "unknown";
-
-    const anyUnknown =
-      shopAgeSource === "unknown" ||
-      ratingSource === "unknown" ||
-      reviewsSource === "unknown" ||
-      shopTotalSalesSource === "unknown";
-
-    if (anyUnknown) {
-      const cacheKey = shopUrl || listingUrl;
-      const cached = cacheKey ? inMemoryPublicDataCache[cacheKey] : null;
-      if (cached) {
-        if (shopTotalSalesSource === "unknown" && cached.shopTotalSalesSource) {
-          shopTotalSales = cached.shopTotalSales;
-          shopTotalSalesSource = cached.shopTotalSalesSource;
-        }
-        if (shopAgeSource === "unknown" && cached.shopAgeSource) {
-          shopAgeMonths = cached.shopAgeMonths;
-          shopAgeSource = cached.shopAgeSource;
-        }
-        if (ratingSource === "unknown" && cached.ratingSource) {
-          rating = cached.rating;
-          ratingSource = cached.ratingSource;
-        }
-        if (reviewsSource === "unknown" && cached.reviewsSource) {
-          reviewsCount = cached.reviewsCount;
-          reviewsSource = cached.reviewsSource;
-        }
-      }
-    }
-
-    return {
-      listingId,
-      listingUrl,
-      listingTitle,
-      shopName,
-      shopUrl,
-      shopAgeMonths,
-      shopAgeSource,
-      shopTotalSales,
-      shopTotalSalesSource,
-      rating,
-      ratingSource,
-      reviewsCount,
-      reviewsSource,
-      isDigital: cardSignals.isDigital,
-      lastProcessedAt: Date.now(),
-    };
-  }
-
-  // ---------------------------------------------------------------------
-  // Derived metrics (computed on read, never cached - they depend on
-  // fields that can change after a public-data fetch resolves)
-  // ---------------------------------------------------------------------
-
-  /**
-   * salesVelocity = shopTotalSales / shopAgeDays (shopAgeDays ~= shopAgeMonths * 30).
-   * Returns null when either input is unknown, or when shopAgeDays is 0
-   * (a brand-new "New on Etsy" shop) - a shop with ~0 elapsed days has no
-   * meaningful velocity yet, and we never divide by zero or fabricate one.
-   */
-  function computeDerivedMetrics(meta) {
-    const shopAgeDays =
-      meta.shopAgeMonths !== null && meta.shopAgeMonths !== undefined
-        ? meta.shopAgeMonths * DAYS_PER_MONTH
-        : null;
-
-    const hasSales = meta.shopTotalSales !== null && meta.shopTotalSales !== undefined;
-    const hasAgeDays = shopAgeDays !== null && shopAgeDays > 0;
-    const salesVelocity = hasSales && hasAgeDays ? meta.shopTotalSales / shopAgeDays : null;
-
-    const digitalScore = meta.isDigital ? 1 : 0;
-
-    let opportunityScore = null;
-    if (salesVelocity !== null) {
-      const ratingComponent =
-        meta.rating !== null && meta.rating !== undefined ? (meta.rating - 3) * 5 : 0;
-      const reviewsComponent =
-        meta.reviewsCount !== null && meta.reviewsCount !== undefined
-          ? Math.log10(meta.reviewsCount + 1) * 3
-          : 0;
-      const digitalComponent = digitalScore * 5;
-      opportunityScore = salesVelocity * 10 + ratingComponent + reviewsComponent + digitalComponent;
-    }
-
-    return { shopAgeDays, salesVelocity, digitalScore, opportunityScore };
-  }
-
-  // ---------------------------------------------------------------------
   // Idle-time processing queue
   // ---------------------------------------------------------------------
+
+  // Shop observations from this batch, flushed to the shared Shop Directory
+  // once per batch instead of once per card (see storage.js).
+  let pendingDirectoryObservations = [];
 
   function processPendingCards(deadline) {
     const start = performance.now();
@@ -390,7 +206,9 @@
       if (cardCache.has(card)) {
         skipped++;
       } else if (document.contains(card)) {
-        cardCache.set(card, extractCardMetadata(card));
+        const meta = extractCardMetadata(card, inMemoryShopDirectory);
+        cardCache.set(card, meta);
+        if (meta.shopUrl) pendingDirectoryObservations.push(meta);
         processed++;
       }
 
@@ -412,6 +230,7 @@
     });
 
     scheduleStyleUpdate();
+    if (pendingDirectoryObservations.length > 0) scheduleDirectoryFlush();
 
     if (pendingCards.size > 0) {
       scheduleIdleProcessing();
@@ -427,6 +246,26 @@
   }
 
   const scheduleIdleProcessing = debounce(runIdleProcessing, 200);
+
+  /**
+   * Writes accumulated shop observations to the shared Shop Directory in one
+   * read+write, instead of one storage round trip per card - so scrolling
+   * past dozens of cards costs a handful of writes, not dozens.
+   */
+  function flushDirectoryObservations() {
+    if (pendingDirectoryObservations.length === 0) return;
+    const batch = pendingDirectoryObservations;
+    pendingDirectoryObservations = [];
+    upsertShopDirectoryEntries(batch)
+      .then((next) => {
+        inMemoryShopDirectory = next;
+      })
+      .catch(() => {
+        /* best-effort persistence only */
+      });
+  }
+
+  const scheduleDirectoryFlush = debounce(flushDirectoryObservations, DIRECTORY_FLUSH_DEBOUNCE_MS);
 
   // ---------------------------------------------------------------------
   // Style/visibility updates (batched into a single rAF per pass)
@@ -735,7 +574,7 @@
   async function processFetchTarget(target) {
     attemptedFetchKeys.add(target.key);
 
-    let result = inMemoryPublicDataCache[target.key] || null;
+    let result = inMemoryShopDirectory[target.key] || null;
     if (!result) {
       try {
         const fetched = await fetchPublicPageData(target.url, fetchState.abortController.signal);
@@ -761,10 +600,19 @@
           reviewsSource: "unavailable",
         };
       }
-      inMemoryPublicDataCache[target.key] = result;
-      setCachedPublicDataEntry(target.key, result).catch(() => {
-        /* best-effort persistence only */
-      });
+      inMemoryShopDirectory[target.key] = result;
+      // A shared shop-directory entry is keyed by shopUrl; the rare
+      // listing-only fallback target (no shop link found on the card) has
+      // no shop to attribute this to, so it's cached in-memory for this
+      // session only, not persisted to the shared directory.
+      const firstMeta = target.cards[0] && cardCache.get(target.cards[0]);
+      if (firstMeta && firstMeta.shopUrl) {
+        upsertShopDirectoryEntries([{ shopUrl: firstMeta.shopUrl, shopName: firstMeta.shopName, ...result }]).catch(
+          () => {
+            /* best-effort persistence only */
+          }
+        );
+      }
     }
 
     const foundSomething =
@@ -1116,10 +964,11 @@
       bootstrapObserver = null;
     }
     resultsContainer = null;
+    flushDirectoryObservations(); // don't lose scan data for cards about to be dropped
     // Page-specific DOM tracking only. Deliberately NOT cleared:
     //   - cardCache (WeakMap): old cards are simply unreachable once dropped
     //     from knownCards, and get garbage-collected naturally.
-    //   - inMemoryPublicDataCache / attemptedFetchKeys: shop/listing facts
+    //   - inMemoryShopDirectory / attemptedFetchKeys: shop/listing facts
     //     already learned remain valid on other pages of the same search and
     //     should never be re-fetched.
     //   - currentSettings: the user's filters must survive page navigation.
@@ -1206,9 +1055,9 @@
     }
 
     try {
-      inMemoryPublicDataCache = await getPublicDataCache();
+      inMemoryShopDirectory = await getShopDirectory();
     } catch (err) {
-      inMemoryPublicDataCache = {};
+      inMemoryShopDirectory = {};
     }
 
     createPanel();
@@ -1227,6 +1076,7 @@
     }
 
     startNavigationWatcher();
+    window.addEventListener("pagehide", flushDirectoryObservations);
 
     onSettingsChanged((newSettings) => {
       currentSettings = newSettings;

@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Etsy Opportunity Finder</title>
+    <link rel="stylesheet" href="dashboard.css" />
+  </head>
+  <body>
+    <header class="dash-header">
+      <h1>Etsy Opportunity Finder</h1>
+      <p class="dash-subtitle">
+        Research new, fast-growing digital-product Etsy shops using only public data.
+      </p>
+    </header>
+
+    <nav class="dash-tabs" role="tablist">
+      <button type="button" class="dash-tab active" data-tab="dashboard" role="tab">Dashboard</button>
+      <button type="button" class="dash-tab" data-tab="keyword-hunter" role="tab">Keyword Hunter</button>
+      <button type="button" class="dash-tab" data-tab="shop-scanner" role="tab">Shop Scanner</button>
+      <button type="button" class="dash-tab" data-tab="winners" role="tab">Winners</button>
+      <button type="button" class="dash-tab" data-tab="saved" role="tab">Saved</button>
+    </nav>
+
+    <main class="dash-content">
+      <!-- ===================== Dashboard ===================== -->
+      <section id="tab-dashboard" class="dash-panel active">
+        <div class="dash-stat-row">
+          <div class="dash-stat-card">
+            <div class="dash-stat-value" id="stat-shops">0</div>
+            <div class="dash-stat-label">Shops scanned</div>
+          </div>
+          <div class="dash-stat-card">
+            <div class="dash-stat-value" id="stat-keywords">0</div>
+            <div class="dash-stat-label">Keywords analyzed</div>
+          </div>
+          <div class="dash-stat-card">
+            <div class="dash-stat-value" id="stat-winners">0</div>
+            <div class="dash-stat-label">Winners found</div>
+          </div>
+        </div>
+
+        <h2>Top niches</h2>
+        <div class="dash-table-wrap">
+          <table class="dash-table" id="dashboard-top-niches">
+            <thead>
+              <tr>
+                <th>Keyword</th>
+                <th>Score</th>
+                <th>Result count</th>
+                <th>New shops</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <h2>Top winners</h2>
+        <div class="dash-table-wrap">
+          <table class="dash-table" id="dashboard-top-winners">
+            <thead>
+              <tr>
+                <th>Shop</th>
+                <th>Age</th>
+                <th>Sales</th>
+                <th>Velocity</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ===================== Keyword Hunter ===================== -->
+      <section id="tab-keyword-hunter" class="dash-panel">
+        <div class="dash-card">
+          <label class="dash-field">
+            <span>Seed keyword</span>
+            <input type="text" id="seed-keyword-input" placeholder="e.g. fitness" />
+          </label>
+          <div class="dash-actions">
+            <button type="button" id="find-opportunities-btn" class="dash-button primary">Find Opportunities</button>
+            <button type="button" id="export-keywords-csv-btn" class="dash-button">Export Keywords CSV</button>
+          </div>
+          <div class="dash-progress" id="keyword-hunt-progress"></div>
+          <p class="dash-note">
+            Generates <code>seed</code>, <code>seed a</code>…<code>seed z</code>, and
+            <code>seed for/with/without/template/planner/tracker/challenge/printable</code>,
+            then fetches each one's real public Etsy search page (never automatically -
+            only when you click the button above). Etsy doesn't publish a public
+            autocomplete API, so "related search" links Etsy shows on those same
+            pages are collected as bonus keyword ideas instead - see the README.
+          </p>
+        </div>
+
+        <div id="top-opportunities" class="dash-card" style="display: none">
+          <h2>Top Opportunities</h2>
+          <ol id="top-opportunities-list" class="dash-opportunity-list"></ol>
+        </div>
+
+        <h2>All analyzed keywords</h2>
+        <div class="dash-table-wrap">
+          <table class="dash-table" id="keyword-results-table">
+            <thead>
+              <tr>
+                <th>Keyword</th>
+                <th>Score</th>
+                <th>Results</th>
+                <th>New shops</th>
+                <th>Best young shop</th>
+                <th>Avg velocity</th>
+                <th>Avg rating</th>
+                <th>Avg reviews</th>
+                <th>Digital %</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ===================== Shop Scanner ===================== -->
+      <section id="tab-shop-scanner" class="dash-panel">
+        <div class="dash-card">
+          <p class="dash-note">
+            Every shop this extension has ever scanned - from browsing Etsy with the
+            floating panel enabled, or from a Keyword Hunter run - accumulates here.
+            Nothing is fetched from this tab; it just displays what's already known.
+          </p>
+          <div class="dash-actions">
+            <button type="button" id="refresh-shop-scanner-btn" class="dash-button">Refresh</button>
+            <button type="button" id="export-shops-csv-btn" class="dash-button">Export Shops CSV</button>
+          </div>
+        </div>
+        <div class="dash-table-wrap">
+          <table class="dash-table" id="shop-scanner-table">
+            <thead>
+              <tr>
+                <th>Shop</th>
+                <th>Sales</th>
+                <th>Age</th>
+                <th>Rating</th>
+                <th>Reviews</th>
+                <th>Velocity</th>
+                <th>Digital %</th>
+                <th>Opportunity</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ===================== Winners ===================== -->
+      <section id="tab-winners" class="dash-panel">
+        <div class="dash-card">
+          <p class="dash-note">
+            "Viral new store" criteria: age under 90 days, shop total sales over 100,
+            sales velocity over 5/day, and a digital-product share over 80% (of the
+            listings from that shop this extension has observed so far).
+          </p>
+          <button type="button" id="refresh-winners-btn" class="dash-button">Refresh</button>
+        </div>
+        <div class="dash-table-wrap">
+          <table class="dash-table" id="winners-table">
+            <thead>
+              <tr>
+                <th>Shop</th>
+                <th>URL</th>
+                <th>Products</th>
+                <th>Sales</th>
+                <th>Age</th>
+                <th>Reviews</th>
+                <th>Rating</th>
+                <th>Velocity</th>
+                <th>Niche</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <h2>Winning patterns</h2>
+        <p class="dash-note">Words repeated across winning shops' listing titles.</p>
+        <ul id="winning-patterns-list" class="dash-pattern-list"></ul>
+      </section>
+
+      <!-- ===================== Saved ===================== -->
+      <section id="tab-saved" class="dash-panel">
+        <h2>Saved keywords</h2>
+        <div class="dash-table-wrap">
+          <table class="dash-table" id="saved-keywords-table">
+            <thead>
+              <tr>
+                <th>Keyword</th>
+                <th>Score</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <h2>Saved shops</h2>
+        <div class="dash-table-wrap">
+          <table class="dash-table" id="saved-shops-table">
+            <thead>
+              <tr>
+                <th>Shop</th>
+                <th>Sales</th>
+                <th>Age</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script src="utils.js"></script>
+    <script src="storage.js"></script>
+    <script src="research.js"></script>
+    <script src="dashboard.js"></script>
+  </body>
+</html>
