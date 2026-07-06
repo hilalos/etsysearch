@@ -126,6 +126,36 @@
   background: #f5f2ee;
 }
 
+.etsy-filter-fetch-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 4px;
+  border-top: 1px solid #eee;
+}
+
+#etsy-filter-fetch-btn {
+  width: 100%;
+  padding: 7px 8px;
+  border-radius: 6px;
+  border: 1px solid #d5d0c8;
+  background: #ffffff;
+  color: #222222;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+#etsy-filter-fetch-btn:hover {
+  background: #f5f2ee;
+}
+
+.etsy-filter-fetch-progress {
+  font-size: 11px;
+  color: #444444;
+  min-height: 14px;
+}
+
 .etsy-filter-status {
   font-size: 12px;
   color: #444444;
