@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "Etsy Advanced Search Filter",
+  "version": "1.0.0",
+  "description": "Adds advanced filtering (New on Etsy, sales range) to Etsy search result pages.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_popup": "src/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "permissions": ["storage"],
+  "host_permissions": ["https://www.etsy.com/*"],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.etsy.com/search*",
+        "https://www.etsy.com/*/search*",
+        "https://www.etsy.com/market/*",
+        "https://www.etsy.com/*/market/*"
+      ],
+      "js": ["src/utils.js", "src/storage.js", "src/content.js"],
+      "css": ["src/styles.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}

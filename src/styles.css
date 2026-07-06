@@ -1,0 +1,166 @@
+/* styles.css
+ * Styles for the floating filter panel and in-card match badges injected
+ * into Etsy search pages. Scoped with #etsy-filter-panel / .etsy-filter-*
+ * class names to avoid colliding with Etsy's own styles.
+ */
+
+#etsy-filter-panel {
+  position: fixed;
+  top: 96px;
+  right: 20px;
+  z-index: 2147483647;
+  width: 260px;
+  background: #ffffff;
+  border: 1px solid #e2ddd6;
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 13px;
+  color: #222222;
+  line-height: 1.4;
+}
+
+#etsy-filter-panel * {
+  box-sizing: border-box;
+}
+
+#etsy-filter-panel.etsy-filter-disabled {
+  opacity: 0.6;
+}
+
+.etsy-filter-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  background: #f56400;
+  color: #ffffff;
+  border-radius: 10px 10px 0 0;
+}
+
+.etsy-filter-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.etsy-filter-collapse {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  color: #ffffff;
+  border-radius: 4px;
+  width: 22px;
+  height: 22px;
+  line-height: 1;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.etsy-filter-body {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+#etsy-filter-panel.etsy-filter-collapsed .etsy-filter-body {
+  display: none;
+}
+
+.etsy-filter-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.etsy-filter-checkbox-row {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.etsy-filter-row input[type="number"] {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid #d5d0c8;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.etsy-filter-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+
+.etsy-filter-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.etsy-filter-actions button {
+  flex: 1;
+  padding: 7px 8px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+#etsy-filter-apply {
+  background: #222222;
+  color: #ffffff;
+}
+
+#etsy-filter-apply:hover {
+  background: #000000;
+}
+
+#etsy-filter-reset {
+  background: #ffffff;
+  color: #222222;
+  border-color: #d5d0c8;
+}
+
+#etsy-filter-reset:hover {
+  background: #f5f2ee;
+}
+
+.etsy-filter-status {
+  font-size: 12px;
+  color: #444444;
+  min-height: 16px;
+}
+
+.etsy-filter-note {
+  font-size: 11px;
+  color: #767676;
+  border-top: 1px solid #eee;
+  padding-top: 8px;
+}
+
+/* Badge injected into matched listing cards. Uses absolute positioning
+   with pointer-events:none so it never intercepts clicks meant for the
+   listing link, and never affects the card's own layout flow. */
+.etsy-filter-card-anchor {
+  position: relative;
+}
+
+.etsy-filter-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 5;
+  max-width: calc(100% - 12px);
+  background: rgba(34, 34, 34, 0.85);
+  color: #ffffff;
+  font-size: 10px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  padding: 2px 6px;
+  border-radius: 4px;
+  pointer-events: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.6;
+}

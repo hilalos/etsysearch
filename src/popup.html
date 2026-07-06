@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Etsy Advanced Search Filter</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="popup">
+      <header class="popup-header">
+        <h1>Etsy Advanced Search Filter</h1>
+        <p class="popup-description">
+          Adds a "New on Etsy" filter and a sales-count range filter to Etsy
+          search result pages.
+        </p>
+      </header>
+
+      <section class="popup-section">
+        <label class="popup-toggle-row">
+          <span>Enable extension</span>
+          <input type="checkbox" id="enable-toggle" />
+        </label>
+      </section>
+
+      <section class="popup-section">
+        <div class="popup-status" id="popup-status">Checking current tab…</div>
+      </section>
+
+      <section class="popup-section">
+        <button type="button" id="open-etsy-btn" class="popup-button">Open Etsy Search</button>
+      </section>
+
+      <footer class="popup-footer">
+        <p>
+          Sales filtering depends on publicly visible sales data. If Etsy does
+          not display sales numbers on the search page, the extension cannot
+          calculate them accurately.
+        </p>
+      </footer>
+    </main>
+
+    <script src="storage.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>
