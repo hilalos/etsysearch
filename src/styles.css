@@ -1,234 +1,504 @@
 /* styles.css
- * Styles for the floating filter panel and in-card match badges injected
- * into Etsy search pages. Scoped with #etsy-filter-panel / .etsy-filter-*
- * class names to avoid colliding with Etsy's own styles.
+ * Styles for the "Etsy Opportunity Finder" floating panel. Scoped with
+ * #eof-panel / .eof-* class names to avoid colliding with Etsy's own
+ * styles. The panel is a self-contained card feed - it never overlays or
+ * mutates Etsy's own product cards.
  */
 
-#etsy-filter-panel {
+#eof-panel {
   position: fixed;
   top: 96px;
   right: 20px;
   z-index: 2147483647;
-  width: 260px;
+  width: 290px;
+  max-height: calc(100vh - 120px);
+  display: flex;
+  flex-direction: column;
   background: #ffffff;
-  border: 1px solid #e2ddd6;
-  border-radius: 10px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+  border: 1px solid #e6e1d8;
+  border-radius: 14px;
+  box-shadow: 0 12px 32px rgba(20, 20, 20, 0.16);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   font-size: 13px;
-  color: #222222;
+  color: #1f1f1f;
   line-height: 1.4;
+  overflow: hidden;
 }
 
-#etsy-filter-panel * {
+#eof-panel * {
   box-sizing: border-box;
 }
 
-#etsy-filter-panel.etsy-filter-disabled {
-  opacity: 0.6;
-}
+/* -------------------------------------------------------------------- */
+/* Header + minimize                                                    */
+/* -------------------------------------------------------------------- */
 
-.etsy-filter-header {
+.eof-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 12px;
-  background: #f56400;
+  padding: 12px 14px;
+  background: linear-gradient(135deg, #f56400, #ff8a3d);
   color: #ffffff;
-  border-radius: 10px 10px 0 0;
+  cursor: grab;
+  flex-shrink: 0;
 }
 
-.etsy-filter-title {
-  font-weight: 600;
+.eof-header:active {
+  cursor: grabbing;
+}
+
+.eof-title {
+  font-weight: 700;
   font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.etsy-filter-collapse {
-  background: transparent;
-  border: 1px solid rgba(255, 255, 255, 0.6);
+.eof-icon-btn {
+  background: rgba(255, 255, 255, 0.18);
+  border: none;
   color: #ffffff;
-  border-radius: 4px;
-  width: 22px;
-  height: 22px;
+  border-radius: 6px;
+  width: 24px;
+  height: 24px;
   line-height: 1;
   cursor: pointer;
-  font-size: 14px;
+  font-size: 16px;
+  flex-shrink: 0;
 }
 
-.etsy-filter-body {
-  padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+.eof-icon-btn:hover {
+  background: rgba(255, 255, 255, 0.32);
 }
 
-#etsy-filter-panel.etsy-filter-collapsed .etsy-filter-body {
+#eof-panel.eof-minimized {
+  width: 200px;
+  max-height: none;
+}
+
+#eof-panel.eof-minimized .eof-nav,
+#eof-panel.eof-minimized .eof-body {
   display: none;
 }
 
-.etsy-filter-row {
+/* -------------------------------------------------------------------- */
+/* Nav (Dashboard / Settings / Saved)                                    */
+/* -------------------------------------------------------------------- */
+
+.eof-nav {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  border-bottom: 1px solid #eee7dc;
+  flex-shrink: 0;
 }
 
-.etsy-filter-checkbox-row {
-  flex-direction: row;
+.eof-nav-btn {
+  flex: 1;
+  padding: 9px 4px;
+  border: none;
+  background: #fbf9f5;
+  font-size: 11px;
+  font-weight: 600;
+  color: #6b6459;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+
+.eof-nav-btn:hover {
+  color: #1f1f1f;
+}
+
+.eof-nav-btn.active {
+  color: #f56400;
+  border-bottom-color: #f56400;
+  background: #ffffff;
+}
+
+/* -------------------------------------------------------------------- */
+/* Body / views                                                         */
+/* -------------------------------------------------------------------- */
+
+.eof-body {
+  overflow-y: auto;
+  flex: 1;
+}
+
+.eof-view {
+  display: none;
+  padding: 14px;
+}
+
+.eof-view.active {
+  display: block;
+}
+
+.eof-section-title {
+  margin: 0 0 4px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.eof-hint {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: #6b6459;
+}
+
+.eof-primary-btn {
+  width: 100%;
+  padding: 10px;
+  border: none;
+  border-radius: 8px;
+  background: #1f1f1f;
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.eof-primary-btn:hover {
+  background: #000000;
+}
+
+.eof-secondary-btn {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid #d9d2c5;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #1f1f1f;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.eof-secondary-btn:hover {
+  background: #f7f4ee;
+}
+
+/* -------------------------------------------------------------------- */
+/* Progress bar                                                          */
+/* -------------------------------------------------------------------- */
+
+.eof-progress {
+  margin-top: 10px;
+}
+
+.eof-progress-label {
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.eof-progress-track {
+  height: 8px;
+  border-radius: 4px;
+  background: #f0ede4;
+  overflow: hidden;
+}
+
+.eof-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #f56400, #ffb144);
+  transition: width 0.25s ease;
+}
+
+.eof-progress-count {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #6b6459;
+}
+
+/* -------------------------------------------------------------------- */
+/* Stats row                                                             */
+/* -------------------------------------------------------------------- */
+
+.eof-stats-row {
+  display: flex;
+  gap: 8px;
+  margin: 14px 0;
+}
+
+.eof-stat {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
   align-items: center;
+  padding: 8px 4px;
+  border-radius: 8px;
+  background: #faf8f4;
+  border: 1px solid #eee7dc;
+}
+
+.eof-stat b {
+  font-size: 16px;
+}
+
+.eof-stat span {
+  font-size: 10px;
+  color: #6b6459;
+  margin-top: 2px;
+  white-space: nowrap;
+}
+
+.eof-stat-hot b {
+  color: #e0472c;
+}
+
+.eof-stat-strong b {
+  color: #2069c9;
+}
+
+/* -------------------------------------------------------------------- */
+/* Result cards                                                          */
+/* -------------------------------------------------------------------- */
+
+.eof-results {
+  display: flex;
+  flex-direction: column;
   gap: 8px;
 }
 
-.etsy-filter-fieldset {
-  border: 1px solid #e2ddd6;
+.eof-empty {
+  font-size: 12px;
+  color: #6b6459;
+  text-align: center;
+  padding: 12px 4px;
+}
+
+.eof-card {
+  border: 1px solid #eee7dc;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #ffffff;
+}
+
+.eof-tier-hot {
+  border-color: #f3b393;
+  background: #fff7f2;
+}
+
+.eof-tier-strong {
+  border-color: #a9c7ec;
+  background: #f3f8ff;
+}
+
+.eof-card-score {
+  font-size: 13px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.eof-tier-hot .eof-card-score {
+  color: #e0472c;
+}
+
+.eof-tier-strong .eof-card-score {
+  color: #2069c9;
+}
+
+.eof-card-shop {
+  font-size: 14px;
+  font-weight: 700;
+  margin-bottom: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.eof-card-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 10px;
+  margin-bottom: 10px;
+}
+
+.eof-card-stat {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+}
+
+.eof-card-stat span {
+  color: #6b6459;
+}
+
+.eof-card-stat b {
+  font-weight: 700;
+}
+
+.eof-card-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.eof-btn {
+  flex: 1;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid #d9d2c5;
+  background: #ffffff;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.eof-btn:hover {
+  background: #f7f4ee;
+}
+
+.eof-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.eof-open-btn {
+  background: #1f1f1f;
+  color: #ffffff;
+  border-color: #1f1f1f;
+}
+
+.eof-open-btn:hover {
+  background: #000000;
+}
+
+/* -------------------------------------------------------------------- */
+/* Settings view                                                        */
+/* -------------------------------------------------------------------- */
+
+.eof-fieldset {
+  border: 1px solid #e6e1d8;
   border-radius: 8px;
   padding: 8px 10px 10px;
-  margin: 0;
+  margin: 0 0 12px;
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
 
-.etsy-filter-fieldset legend {
+.eof-fieldset legend {
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 700;
   padding: 0 4px;
 }
 
-.etsy-filter-radio-row {
-  flex-direction: row;
+.eof-radio-row {
+  display: flex;
   align-items: center;
   gap: 8px;
+  font-size: 12px;
 }
 
-.etsy-filter-row input[type="radio"] {
+.eof-radio-row input {
   width: 14px;
   height: 14px;
   margin: 0;
 }
 
-.etsy-filter-debug-row {
-  padding-top: 4px;
-  border-top: 1px solid #eee;
+.eof-field-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 12px;
 }
 
-.etsy-filter-row input[type="number"] {
-  width: 100%;
+.eof-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.eof-field input {
+  font-weight: normal;
   padding: 6px 8px;
-  border: 1px solid #d5d0c8;
+  border: 1px solid #d9d2c5;
   border-radius: 6px;
-  font-size: 13px;
+  font-size: 12px;
 }
 
-.etsy-filter-row input[type="checkbox"] {
-  width: 16px;
-  height: 16px;
+.eof-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+
+.eof-checkbox-row input {
+  width: 15px;
+  height: 15px;
   margin: 0;
 }
 
-.etsy-filter-actions {
+.eof-debug-row {
+  padding-top: 8px;
+  border-top: 1px solid #eee7dc;
+}
+
+.eof-actions {
   display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.eof-actions .eof-primary-btn,
+.eof-actions .eof-secondary-btn {
+  width: auto;
+  flex: 1;
+}
+
+.eof-note {
+  font-size: 10px;
+  color: #8a8377;
+  line-height: 1.5;
+  margin: 0;
+}
+
+/* -------------------------------------------------------------------- */
+/* Saved view                                                            */
+/* -------------------------------------------------------------------- */
+
+.eof-saved-list {
+  display: flex;
+  flex-direction: column;
   gap: 8px;
 }
 
-.etsy-filter-actions button {
-  flex: 1;
-  padding: 7px 8px;
-  border-radius: 6px;
-  border: 1px solid transparent;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-#etsy-filter-apply {
-  background: #222222;
-  color: #ffffff;
-}
-
-#etsy-filter-apply:hover {
-  background: #000000;
-}
-
-#etsy-filter-reset {
-  background: #ffffff;
-  color: #222222;
-  border-color: #d5d0c8;
-}
-
-#etsy-filter-reset:hover {
-  background: #f5f2ee;
-}
-
-.etsy-filter-fetch-row {
+.eof-saved-row {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding-top: 4px;
-  border-top: 1px solid #eee;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid #eee7dc;
+  border-radius: 8px;
+  padding: 8px 10px;
 }
 
-#etsy-filter-fetch-btn {
-  width: 100%;
-  padding: 7px 8px;
-  border-radius: 6px;
-  border: 1px solid #d5d0c8;
-  background: #ffffff;
-  color: #222222;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-#etsy-filter-fetch-btn:hover {
-  background: #f5f2ee;
-}
-
-.etsy-filter-fetch-progress {
-  font-size: 11px;
-  color: #444444;
-  min-height: 14px;
-}
-
-.etsy-filter-status {
+.eof-saved-shop {
   font-size: 12px;
-  color: #444444;
-  min-height: 16px;
-}
-
-.etsy-filter-note {
-  font-size: 11px;
-  color: #767676;
-  border-top: 1px solid #eee;
-  padding-top: 8px;
-}
-
-/* Badge injected into matched listing cards. Uses absolute positioning
-   with pointer-events:none so it never intercepts clicks meant for the
-   listing link, and never affects the card's own layout flow. */
-.etsy-filter-card-anchor {
-  position: relative;
-}
-
-.etsy-filter-badge {
-  position: absolute;
-  top: 6px;
-  left: 6px;
-  z-index: 5;
-  max-width: calc(100% - 12px);
-  max-height: calc(100% - 12px);
-  background: rgba(20, 20, 20, 0.88);
-  color: #ffffff;
-  font-size: 10px;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  padding: 4px 6px;
-  border-radius: 4px;
-  pointer-events: none;
-  overflow: hidden;
-  line-height: 1.5;
-}
-
-.etsy-filter-badge-line {
-  white-space: nowrap;
+  font-weight: 700;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 120px;
+}
+
+.eof-saved-meta {
+  font-size: 10px;
+  color: #6b6459;
+}
+
+.eof-saved-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.eof-saved-actions .eof-btn {
+  flex: none;
+  padding: 4px 8px;
 }

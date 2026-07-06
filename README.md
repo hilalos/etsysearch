@@ -31,7 +31,56 @@ never a specific product's. This extension:
   not on a timer. Every network request in this extension traces back to
   a specific button click.
 
-## Part 1: the live floating filter panel
+## Part 1: the live floating panel
+
+The panel is designed so a first-time user understands it within 5
+seconds: **these are new Etsy shops making money fast.** It never shows
+every filter up front - the main view is just a "Search Analysis" prompt
+and a **🚀 Start Research** button; filters live in a separate Settings
+view, opened deliberately.
+
+**Header:** 🔥 Etsy Opportunity Finder, with a minimize button. **Nav
+bar:** 📊 Dashboard (opens the full research dashboard in a new tab),
+⚙️ Settings (filters), ⭐ Saved (bookmarked shops).
+
+**Main view flow:** Start Research → Analyze → Find Winners → Save.
+
+1. Click **🚀 Start Research**. Progress shows "Scanning Etsy..." then
+   "Analyzing shops... X / Y shops analyzed" with a progress bar (this is
+   the only network-fetching step here, and it's the one described under
+   [Ethical usage](#ethical-usage--rate-limiting) below).
+2. Once done, a stats row shows **🔥 Hot Opportunities**, **🚀 Strong**,
+   and **average sales/day** across everything found on the page so far.
+3. Below that, a scrollable feed of **opportunity cards** - one per shop,
+   deduplicated even if that shop has several listings on the page,
+   ranked by opportunity score - each showing:
+
+   ```
+   🔥 Score 94
+   Shop: FitnessPlannerCo
+   Age: 3 months
+   Sales: 850
+   Growth: 9.4 sales/day
+   Rating: ⭐4.9 (140)
+   Digital: YES
+   [Open Shop]  [★ Save]
+   ```
+
+   (The underlying opportunity-score formula below is uncapped for
+   internal ranking, but the number shown on a card is clamped to a
+   familiar 0-100 scale - "Score 320" would read as broken.)
+
+4. Click the button again (now **🔄 Refresh Research**) any time - e.g.
+   after scrolling for more listings - to pick up anything new. New cards
+   are scanned for free in the background the whole time regardless
+   (Level 1 detection, no network); refreshing only re-runs the network
+   part (Level 2) for shops still missing data.
+
+The panel is draggable (grab the header) and remembers where you leave it
+and whether it's minimized, both persisted via `chrome.storage.sync`.
+**Debug mode** (raw console logging of navigation/processing/fetch
+events) only ever appears in Settings when the extension is loaded
+unpacked (developer mode) - it's never part of the normal user-facing UI.
 
 ### Scanned fields
 
@@ -88,14 +137,13 @@ intentionally transparent and adjustable - treat it as a starting point.
 - Kept working across **pagination** (page 1, 2, 3, next/previous, and
   direct `?page=N` URLs), whether Etsy navigates with a full page reload
   or a client-side (SPA-style) transition
-- **Maximum Shop Age** filter: All / New on Etsy / 1 / 2 / 3 / 6 months or newer
-- **Digital products only** checkbox
-- **Minimum rating**, **minimum reviews**, **minimum shop total sales**,
-  **minimum sales/day velocity** filters, plus a **Hide listings with
-  unavailable data** checkbox
-- A compact per-card scanner overlay (shown whenever a filter is active)
-- **Debug mode** checkbox for console logging of navigation, processing,
-  and filtering events
+- Settings (opened deliberately, not shown by default): **Shop age**
+  (Any / New / <1 month / <3 months / <6 months), **Digital products
+  only**, **minimum rating / reviews / shop total sales / sales-per-day
+  velocity**, and a **Hide shops with unavailable data** checkbox
+- A self-contained opportunity-card feed inside the panel - it never
+  overlays or hides Etsy's own product cards
+- Draggable, remembers its position and minimized state
 - Toolbar popup to enable/disable the extension, jump to Etsy search, or
   open the research dashboard
 
@@ -108,27 +156,31 @@ digital-product indicator. Separately, the card's full text is scanned
 for shop total sales. See [Scanned fields](#scanned-fields) above for the
 exact phrases matched.
 
-**Level 2 - opt-in, public-page enrichment:** clicking **Fetch public
-data** fetches the shop page (preferred - reusable across every card from
-that shop) or the listing page, and searches its text for the same four
-shop-level facts, using patterns that require more surrounding context
-than the card-level versions (a bare decimal floating in a large page of
-text is not a trustworthy rating signal on its own). **Digital-product
-detection is intentionally Level-1 only** - re-checking it via fetch would
-mean a request for nearly every physical-goods listing (the vast majority
-of Etsy), which conflicts with the "don't scrape aggressively" rule.
+**Level 2 - opt-in, public-page enrichment:** clicking **Start Research**
+(or **Refresh Research**) fetches the shop page (preferred - reusable
+across every card from that shop) or the listing page for shops still
+missing data, and searches its text for the same four shop-level facts,
+using patterns that require more surrounding context than the card-level
+versions (a bare decimal floating in a large page of text is not a
+trustworthy rating signal on its own). **Digital-product detection is
+intentionally Level-1 only** - re-checking it via fetch would mean a
+request for nearly every physical-goods listing (the vast majority of
+Etsy), which conflicts with the "don't scrape aggressively" rule.
 
 ### Filtering logic
 
-- **Maximum Shop Age**: "All" shows everything; every other bucket
-  excludes listings with an unknown age (there's no "show anyway" option
-  for shop age, since an unknown age means the extension genuinely can't
-  tell which bucket it belongs in).
-- **Digital products only**: shows only listings where a digital
-  indicator was found on the card.
+- **Shop age**: "Any" shows everything; every other bucket excludes
+  shops with an unknown age (there's no "show anyway" option for shop
+  age, since an unknown age means the extension genuinely can't tell
+  which bucket it belongs in).
+- **Digital products only**: shows only shops where a digital indicator
+  was found on at least one scanned listing.
 - **Minimum rating / reviews / shop total sales / sales-per-day
-  velocity**: each hides listings below the threshold; an unknown value
-  is hidden only if **Hide listings with unavailable data** is checked.
+  velocity**: each excludes shops below the threshold from the feed; an
+  unknown value is excluded only if **Hide shops with unavailable data**
+  is checked.
+- Filters apply to the panel's own opportunity-card feed only - they
+  never hide or modify Etsy's own product grid.
 
 ### Pagination and dynamic navigation
 
@@ -159,8 +211,9 @@ reprocessed automatically - no need to click Apply again.
   `WeakMap` keyed by the card element - scanned exactly once, ever.
 - **Debounced, idle-time processing**: mutation bursts are debounced
   (~200-300ms) and actual detection runs inside `requestIdleCallback`.
-- **Batched style writes**: visibility/badge updates for all cards happen
-  in one `requestAnimationFrame` per pass.
+- **Batched feed re-renders**: the results feed (filtering, sorting,
+  dedup by shop, DOM updates) recomputes once per `requestAnimationFrame`
+  pass, not on every individual card processed.
 - **Batched Shop Directory writes**: scanning a batch of cards (e.g. one
   scroll's worth) accumulates observations in memory and flushes them to
   `chrome.storage.local` once (debounced ~1.5s), not once per card -
@@ -275,8 +328,8 @@ else in the dashboard - with a **Remove** button to unsave.
 ## Ethical usage / rate limiting
 
 Every network request in this extension - from the floating panel's
-**Fetch public data** button and from the dashboard's **Find
-Opportunities** button - follows the same rules:
+**Start Research** / **Refresh Research** button and from the dashboard's
+**Find Opportunities** button - follows the same rules:
 
 - **Never automatic.** Nothing fetches on page load, scroll, or a timer.
   Every request traces back to a button click.
@@ -295,7 +348,8 @@ Opportunities** button - follows the same rules:
   re-fetched again on a future visit or run either.
 - **No credentials sent**: fetches use `credentials: 'omit'`, so only
   whatever a logged-out visitor could publicly see is ever read.
-- **Stoppable** at any time (**Stop fetching** / **Stop** buttons).
+- **Stoppable** at any time - clicking **⏹ Stop Research** (the same
+  button, mid-run) or the dashboard's **Stop** button.
 - **No re-fetching for digital-product detection** - stays Level-1
   (card-only) specifically to avoid a request for nearly every listing.
 - Uses only `fetch()` against normal public Etsy page URLs - no private
@@ -375,7 +429,7 @@ Opportunities** button - follows the same rules:
 /src/popup.html       Toolbar popup markup
 /src/popup.js         Toolbar popup logic (enable/disable, open Etsy, open dashboard)
 /src/popup.css
-/src/styles.css       Styles for the injected filter panel and scanner overlay
+/src/styles.css       Styles for the floating panel's header/nav/views/result cards
 /icons/               Extension icons (16/48/128px)
 ```
 

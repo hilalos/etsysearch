@@ -27,6 +27,8 @@
     minSalesVelocity: "",
     hideUnavailableData: false,
     debugMode: false,
+    panelPosition: null, // { top, left } in px, or null to use the default top-right anchor
+    panelMinimized: false,
   };
 
   const SETTINGS_KEY = "etsyFilterSettings";

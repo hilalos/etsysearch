@@ -1,8 +1,9 @@
 /**
  * content.js
- * Injected on Etsy search / market pages. Renders a floating filter panel
- * that scans listing cards for public shop/listing metadata and hides
- * cards that don't match the user's filters.
+ * Injected on Etsy search / market pages. Renders the "Etsy Opportunity
+ * Finder" floating panel: a compact, self-contained feed of scored shop
+ * opportunities found on the current search page - never an overlay on top
+ * of Etsy's own product cards.
  *
  * Important data-model note: Etsy does not expose a per-product sales
  * count anywhere public. Every "N sales" figure we ever detect - on a
@@ -10,6 +11,11 @@
  * running total, never that one product's. This file never calculates,
  * infers, or invents a per-product sales number; "shopTotalSales" is the
  * only sales concept anywhere in this codebase.
+ *
+ * UX model (see README): the panel guides a single loop - Start Research
+ * -> Analyze -> Find Winners -> Save. Filters live in a separate Settings
+ * view, not the main view, so a first-time user sees only a "Start
+ * Research" call to action, not a wall of technical controls.
  *
  * Performance model (see README for the full write-up):
  *   - We observe only the search-results container (not document.body), and
@@ -20,8 +26,7 @@
  *     page never re-run detection on cards we've already looked at.
  *   - Mutation bursts are debounced, and the actual DOM scan/processing runs
  *     inside requestIdleCallback so it never competes with scrolling/painting.
- *   - Style/visibility writes are batched into a single requestAnimationFrame
- *     per pass instead of being interleaved with reads.
+ *   - Feed re-renders are batched into a single requestAnimationFrame per pass.
  *
  * Navigation model (see README): Etsy's pagination/search can change the URL
  * and swap the results container without a full page reload. We detect that
@@ -52,6 +57,9 @@
     onSettingsChanged,
     getShopDirectory,
     upsertShopDirectoryEntries,
+    getSavedItems,
+    saveItem,
+    removeSavedItem,
     DEFAULT_SETTINGS,
   } = window.EtsyFilterStorage || {};
 
@@ -60,19 +68,21 @@
     return;
   }
 
-  const PANEL_ID = "etsy-filter-panel";
-  const BADGE_CLASS = "etsy-filter-badge";
+  const PANEL_ID = "eof-panel";
   const LIMITATION_NOTE =
-    "Etsy does not always show shop total sales, shop age, rating, or reviews on search pages. This data may require fetching each public listing/shop page, and may still be unavailable. Nothing here is ever invented, estimated, or calculated per-product - Etsy has no public per-product sales figure.";
+    "All data comes from Etsy's own public pages - shop total sales, shop age, rating, and reviews. Nothing is invented, and there is no per-product sales figure anywhere (Etsy doesn't expose one).";
 
   const FETCH_CONCURRENCY = 1; // polite default; see README for rationale
   const FETCH_DELAY_MS = 1200; // delay between requests, within the 800-1500ms range
   const NAV_POLL_MS = 1000; // safety-net URL/container-health poll
   const DIRECTORY_FLUSH_DEBOUNCE_MS = 1500; // batch shop-directory writes, not one per card
+  const CARD_DISPLAY_LIMIT = 20; // keep the feed compact/scannable
+  const HOT_SCORE_THRESHOLD = 80;
+  const STRONG_SCORE_THRESHOLD = 50;
 
   // Unpacked/dev-loaded extensions have no "update_url" in their manifest;
-  // Chrome Web Store installs do. Debug logging is also always-on in that
-  // case, on top of the explicit "Debug mode" panel checkbox.
+  // Chrome Web Store installs do. Debug mode is only ever shown/available in
+  // that case - it never appears in the main UI otherwise.
   const isDevMode = (() => {
     try {
       return !("update_url" in chrome.runtime.getManifest());
@@ -84,7 +94,7 @@
   function logDebug(label, data) {
     if (!isDevMode && !currentSettings.debugMode) return;
     // eslint-disable-next-line no-console
-    console.log(`[Etsy Filter][debug] ${label}`, data);
+    console.log(`[Etsy Opportunity Finder][debug] ${label}`, data);
   }
 
   let currentSettings = { ...DEFAULT_SETTINGS };
@@ -110,6 +120,8 @@
   let bootstrapObserver = null;
   let styleUpdateScheduled = false;
   let lastKnownUrl = location.href;
+  let hasStartedResearch = false; // session-only; never persisted, never auto-triggered
+  let currentView = "main"; // 'main' | 'settings' | 'saved'
 
   const fetchState = {
     running: false,
@@ -133,6 +145,12 @@
     } catch (err) {
       return 1;
     }
+  }
+
+  function escapeHtml(value) {
+    const div = document.createElement("div");
+    div.textContent = value === null || value === undefined ? "" : String(value);
+    return div.innerHTML;
   }
 
   // ---------------------------------------------------------------------
@@ -229,7 +247,7 @@
       knownListings: knownCards.size,
     });
 
-    scheduleStyleUpdate();
+    scheduleFeedUpdate();
     if (pendingDirectoryObservations.length > 0) scheduleDirectoryFlush();
 
     if (pendingCards.size > 0) {
@@ -268,102 +286,39 @@
   const scheduleDirectoryFlush = debounce(flushDirectoryObservations, DIRECTORY_FLUSH_DEBOUNCE_MS);
 
   // ---------------------------------------------------------------------
-  // Style/visibility updates (batched into a single rAF per pass)
+  // Scoring + formatting helpers for the results feed
   // ---------------------------------------------------------------------
 
-  function formatShopAge(months) {
-    if (months === 0) return "New on Etsy";
-    if (months === 1) return "1 month on Etsy";
-    return `${months} months on Etsy`;
+  function scoreTier(score) {
+    if (score === null || score === undefined) return null;
+    if (score >= HOT_SCORE_THRESHOLD) return "hot";
+    if (score >= STRONG_SCORE_THRESHOLD) return "strong";
+    return "emerging";
   }
 
-  function shopAgeLabel(meta) {
-    if (meta.shopAgeMonths !== null && meta.shopAgeMonths !== undefined) {
-      return formatShopAge(meta.shopAgeMonths);
-    }
-    if (meta.shopAgeSource === "unavailable") return "unavailable";
-    return "not fetched yet";
+  function formatAgeShort(months) {
+    if (months === null || months === undefined) return "Unknown";
+    if (months === 0) return "New";
+    if (months === 1) return "1 month";
+    return `${months} months`;
   }
 
-  function shopTotalSalesLabel(meta) {
+  function formatSalesShort(meta) {
     if (meta.shopTotalSales !== null && meta.shopTotalSales !== undefined) {
-      const sourceLabel = meta.shopTotalSalesSource === "public" ? " (public page)" : "";
-      return `${meta.shopTotalSales.toLocaleString()} sales${sourceLabel}`;
+      return meta.shopTotalSales.toLocaleString();
     }
-    if (meta.shopTotalSalesSource === "unavailable") return "unavailable";
-    return "not fetched yet";
+    return meta.shopTotalSalesSource === "unavailable" ? "Unavailable" : "Unknown";
   }
 
-  function ratingReviewsLabel(meta) {
+  function formatVelocityShort(derived) {
+    return derived.salesVelocity !== null ? `${derived.salesVelocity.toFixed(1)} sales/day` : "—";
+  }
+
+  function formatRatingShort(meta) {
     const ratingPart = meta.rating !== null && meta.rating !== undefined ? meta.rating.toFixed(1) : "—";
     const reviewsPart =
-      meta.reviewsCount !== null && meta.reviewsCount !== undefined
-        ? meta.reviewsCount.toLocaleString()
-        : "—";
-    return `★ ${ratingPart} (${reviewsPart})`;
-  }
-
-  function salesVelocityLabel(meta, derived) {
-    if (derived.salesVelocity !== null) return `${derived.salesVelocity.toFixed(2)}/day`;
-    if (meta.shopAgeMonths === 0) return "too new to calculate";
-    return "unavailable";
-  }
-
-  function opportunityScoreLabel(derived) {
-    return derived.opportunityScore !== null ? derived.opportunityScore.toFixed(1) : "unavailable";
-  }
-
-  function truncate(text, maxLen) {
-    if (!text) return text;
-    return text.length > maxLen ? `${text.slice(0, maxLen - 1)}…` : text;
-  }
-
-  /**
-   * Builds the scanner's per-card display lines: shop name, product title,
-   * rating/reviews, shop total sales, shop age, sales/day velocity, digital
-   * status, and opportunity score - everything the scanner is required to
-   * show, laid out compactly.
-   */
-  function buildScannerLines(meta, derived) {
-    const lines = [];
-    lines.push(`Shop: ${meta.shopName || "unknown"}`);
-    if (meta.listingTitle) lines.push(truncate(meta.listingTitle, 48));
-    lines.push(ratingReviewsLabel(meta));
-    lines.push(`Sales: ${shopTotalSalesLabel(meta)} · Age: ${shopAgeLabel(meta)}`);
-    lines.push(`Velocity: ${salesVelocityLabel(meta, derived)}`);
-    lines.push(`Digital: ${meta.isDigital ? "Yes" : "No"} · Opportunity: ${opportunityScoreLabel(derived)}`);
-    return lines;
-  }
-
-  function annotateCard(card, meta, derived, visible, scannerActive) {
-    let badge = card.querySelector(`:scope > .${BADGE_CLASS}`);
-
-    if (!visible || !scannerActive) {
-      if (badge) badge.remove();
-      return;
-    }
-
-    if (!badge) {
-      badge = document.createElement("div");
-      badge.className = BADGE_CLASS;
-      if (window.getComputedStyle(card).position === "static") {
-        card.classList.add("etsy-filter-card-anchor");
-      }
-      card.appendChild(badge);
-    }
-
-    badge.textContent = ""; // clear previous lines before rebuilding
-    buildScannerLines(meta, derived).forEach((line) => {
-      const lineEl = document.createElement("div");
-      lineEl.className = "etsy-filter-badge-line";
-      lineEl.textContent = line;
-      badge.appendChild(lineEl);
-    });
-  }
-
-  function removeBadge(card) {
-    const badge = card.querySelector(`:scope > .${BADGE_CLASS}`);
-    if (badge) badge.remove();
+      meta.reviewsCount !== null && meta.reviewsCount !== undefined ? ` (${meta.reviewsCount})` : "";
+    return `⭐${ratingPart}${reviewsPart}`;
   }
 
   function passesShopAgeFilter(meta) {
@@ -380,16 +335,11 @@
     return threshold !== undefined ? age <= threshold : true;
   }
 
-  function applyFiltersToAllKnownCards() {
-    if (!currentSettings.enabled) {
-      knownCards.forEach((card) => {
-        card.style.display = "";
-        removeBadge(card);
-      });
-      updateStatus(null);
-      return;
-    }
-
+  /**
+   * Computes the current filtered, deduplicated (one card per shop), sorted
+   * (best opportunity score first) list the results feed should show.
+   */
+  function getFilteredSortedOpportunities() {
     const minRating = currentSettings.minRating !== "" ? Number(currentSettings.minRating) : null;
     const minReviews = currentSettings.minReviews !== "" ? Number(currentSettings.minReviews) : null;
     const minShopTotalSales =
@@ -401,14 +351,11 @@
     const hasMinReviews = minReviews !== null && !Number.isNaN(minReviews);
     const hasMinSales = minShopTotalSales !== null && !Number.isNaN(minShopTotalSales);
     const hasMinVelocity = minSalesVelocity !== null && !Number.isNaN(minSalesVelocity);
-
     const shopAgeActive = !!currentSettings.shopAgeFilter && currentSettings.shopAgeFilter !== "all";
     const digitalActive = !!currentSettings.digitalOnly;
-    const scannerActive =
-      shopAgeActive || digitalActive || hasMinRating || hasMinReviews || hasMinSales || hasMinVelocity;
 
-    let visibleCount = 0;
-    let total = 0;
+    const seenShopUrls = new Set();
+    const opportunities = [];
     const stale = [];
 
     knownCards.forEach((card) => {
@@ -416,84 +363,219 @@
         stale.push(card);
         return;
       }
-
       const meta = cardCache.get(card);
-      if (!meta) return; // still pending processing; next pass will pick it up
+      if (!meta || !meta.shopUrl || seenShopUrls.has(meta.shopUrl)) return;
 
-      total++;
+      let passes = true;
+      if (shopAgeActive && !passesShopAgeFilter(meta)) passes = false;
+      if (passes && digitalActive && !meta.isDigital) passes = false;
+
+      if (passes && hasMinRating) {
+        if (meta.rating === null || meta.rating === undefined) passes = !currentSettings.hideUnavailableData;
+        else if (meta.rating < minRating) passes = false;
+      }
+      if (passes && hasMinReviews) {
+        if (meta.reviewsCount === null || meta.reviewsCount === undefined) passes = !currentSettings.hideUnavailableData;
+        else if (meta.reviewsCount < minReviews) passes = false;
+      }
+      if (passes && hasMinSales) {
+        if (meta.shopTotalSales === null || meta.shopTotalSales === undefined) passes = !currentSettings.hideUnavailableData;
+        else if (meta.shopTotalSales < minShopTotalSales) passes = false;
+      }
+
       const derived = computeDerivedMetrics(meta);
-      let visible = true;
-
-      if (shopAgeActive && !passesShopAgeFilter(meta)) visible = false;
-
-      if (visible && digitalActive && !meta.isDigital) visible = false;
-
-      if (visible && hasMinRating) {
-        if (meta.rating === null || meta.rating === undefined) {
-          visible = !currentSettings.hideUnavailableData;
-        } else if (meta.rating < minRating) {
-          visible = false;
-        }
+      if (passes && hasMinVelocity) {
+        if (derived.salesVelocity === null) passes = !currentSettings.hideUnavailableData;
+        else if (derived.salesVelocity < minSalesVelocity) passes = false;
       }
 
-      if (visible && hasMinReviews) {
-        if (meta.reviewsCount === null || meta.reviewsCount === undefined) {
-          visible = !currentSettings.hideUnavailableData;
-        } else if (meta.reviewsCount < minReviews) {
-          visible = false;
-        }
-      }
-
-      if (visible && hasMinSales) {
-        if (meta.shopTotalSales === null || meta.shopTotalSales === undefined) {
-          visible = !currentSettings.hideUnavailableData;
-        } else if (meta.shopTotalSales < minShopTotalSales) {
-          visible = false;
-        }
-      }
-
-      if (visible && hasMinVelocity) {
-        if (derived.salesVelocity === null) {
-          visible = !currentSettings.hideUnavailableData;
-        } else if (derived.salesVelocity < minSalesVelocity) {
-          visible = false;
-        }
-      }
-
-      card.style.display = visible ? "" : "none";
-      annotateCard(card, meta, derived, visible, scannerActive);
-      if (visible) visibleCount++;
+      if (!passes) return;
+      seenShopUrls.add(meta.shopUrl);
+      opportunities.push({ meta, derived });
     });
 
     stale.forEach((card) => knownCards.delete(card));
-    updateStatus({ visible: visibleCount, total });
-    updateFetchUI();
+    opportunities.sort((a, b) => (b.derived.opportunityScore ?? -Infinity) - (a.derived.opportunityScore ?? -Infinity));
+    return opportunities;
+  }
 
-    logDebug("filter pass", {
+  // ---------------------------------------------------------------------
+  // Results feed rendering (batched into a single rAF per pass)
+  // ---------------------------------------------------------------------
+
+  function buildResultCardElement(meta, derived, isSaved) {
+    const card = document.createElement("div");
+    const tier = scoreTier(derived.opportunityScore);
+    card.className = `eof-card${tier ? ` eof-tier-${tier}` : ""}`;
+
+    const scoreEmoji = tier === "hot" ? "🔥" : tier === "strong" ? "🚀" : "⭐";
+    // The underlying opportunityScore formula (see utils.js) is intentionally
+    // uncapped for internal ranking, but displaying "Score 320" reads as
+    // broken - shown score is clamped to a familiar 0-100 scale.
+    const scoreText =
+      derived.opportunityScore !== null ? Math.min(100, Math.max(0, Math.round(derived.opportunityScore))) : "—";
+
+    card.innerHTML = `
+      <div class="eof-card-score">${scoreEmoji} Score ${scoreText}</div>
+      <div class="eof-card-shop">${escapeHtml(meta.shopName || "Unknown shop")}</div>
+      <div class="eof-card-stats">
+        <div class="eof-card-stat"><span>Age</span><b>${escapeHtml(formatAgeShort(meta.shopAgeMonths))}</b></div>
+        <div class="eof-card-stat"><span>Sales</span><b>${escapeHtml(formatSalesShort(meta))}</b></div>
+        <div class="eof-card-stat"><span>Growth</span><b>${escapeHtml(formatVelocityShort(derived))}</b></div>
+        <div class="eof-card-stat"><span>Rating</span><b>${escapeHtml(formatRatingShort(meta))}</b></div>
+        <div class="eof-card-stat"><span>Digital</span><b>${meta.isDigital ? "YES" : "NO"}</b></div>
+      </div>
+      <div class="eof-card-actions">
+        <button type="button" class="eof-btn eof-open-btn">Open Shop</button>
+        <button type="button" class="eof-btn eof-save-btn" ${isSaved ? "disabled" : ""}>${isSaved ? "✓ Saved" : "★ Save"}</button>
+      </div>
+    `;
+
+    card.querySelector(".eof-open-btn").addEventListener("click", () => {
+      if (meta.shopUrl) window.open(meta.shopUrl, "_blank", "noopener");
+    });
+
+    const saveBtn = card.querySelector(".eof-save-btn");
+    if (!isSaved) {
+      saveBtn.addEventListener("click", () => {
+        saveItem("shop", meta.shopUrl, {
+          shopUrl: meta.shopUrl,
+          shopName: meta.shopName,
+          shopTotalSales: meta.shopTotalSales,
+          shopAgeMonths: meta.shopAgeMonths,
+          rating: meta.rating,
+          reviewsCount: meta.reviewsCount,
+          isDigital: meta.isDigital,
+        });
+        saveBtn.textContent = "✓ Saved";
+        saveBtn.disabled = true;
+      });
+    }
+
+    return card;
+  }
+
+  function renderResultsFeed() {
+    const panel = document.getElementById(PANEL_ID);
+    if (!panel) return;
+
+    const heroSection = panel.querySelector("#eof-hero");
+    const progressSection = panel.querySelector("#eof-progress");
+    const statsRow = panel.querySelector("#eof-stats-row");
+    const resultsEl = panel.querySelector("#eof-results");
+    const startBtn = panel.querySelector("#eof-start-btn");
+
+    if (!currentSettings.enabled) {
+      heroSection.querySelector("#eof-hint").textContent = "Extension disabled - enable it from the toolbar popup.";
+      startBtn.style.display = "none";
+      progressSection.style.display = "none";
+      statsRow.style.display = "none";
+      resultsEl.innerHTML = "";
+      return;
+    }
+    startBtn.style.display = "";
+
+    if (fetchState.running) {
+      const label = panel.querySelector("#eof-progress-label");
+      const bar = panel.querySelector("#eof-progress-bar");
+      const count = panel.querySelector("#eof-progress-count");
+      label.textContent = fetchState.total > 0 ? "Analyzing shops..." : "Scanning Etsy...";
+      const pct = fetchState.total > 0 ? Math.round((fetchState.fetched / fetchState.total) * 100) : 8;
+      bar.style.width = `${pct}%`;
+      count.textContent = fetchState.total > 0 ? `${fetchState.fetched} / ${fetchState.total} shops analyzed` : "";
+      progressSection.style.display = "";
+      statsRow.style.display = "none";
+      startBtn.textContent = "⏹ Stop Research";
+      return;
+    }
+
+    progressSection.style.display = "none";
+    startBtn.textContent = hasStartedResearch ? "🔄 Refresh Research" : "🚀 Start Research";
+
+    if (!hasStartedResearch) {
+      statsRow.style.display = "none";
+      resultsEl.innerHTML = "";
+      return;
+    }
+
+    const opportunities = getFilteredSortedOpportunities();
+
+    let hotCount = 0;
+    let strongCount = 0;
+    let velocitySum = 0;
+    let velocityCount = 0;
+    opportunities.forEach(({ derived }) => {
+      const tier = scoreTier(derived.opportunityScore);
+      if (tier === "hot") hotCount++;
+      else if (tier === "strong") strongCount++;
+      if (derived.salesVelocity !== null) {
+        velocitySum += derived.salesVelocity;
+        velocityCount++;
+      }
+    });
+
+    panel.querySelector("#eof-stat-hot").textContent = hotCount;
+    panel.querySelector("#eof-stat-strong").textContent = strongCount;
+    panel.querySelector("#eof-stat-avg-velocity").textContent =
+      velocityCount > 0 ? (velocitySum / velocityCount).toFixed(1) : "—";
+    statsRow.style.display = "";
+
+    getSavedItems()
+      .then((saved) => {
+        const savedShopUrls = new Set(
+          Object.values(saved)
+            .filter((entry) => entry.type === "shop")
+            .map((entry) => entry.id)
+        );
+
+        resultsEl.innerHTML = "";
+        if (opportunities.length === 0) {
+          resultsEl.innerHTML =
+            '<div class="eof-empty">No shops match your filters yet. Try adjusting Settings, or scroll for more listings.</div>';
+          return;
+        }
+
+        opportunities.slice(0, CARD_DISPLAY_LIMIT).forEach(({ meta, derived }) => {
+          resultsEl.appendChild(buildResultCardElement(meta, derived, savedShopUrls.has(meta.shopUrl)));
+        });
+
+        if (opportunities.length > CARD_DISPLAY_LIMIT) {
+          const more = document.createElement("div");
+          more.className = "eof-empty";
+          more.textContent = `Showing top ${CARD_DISPLAY_LIMIT} of ${opportunities.length} matching shops.`;
+          resultsEl.appendChild(more);
+        }
+      })
+      .catch(() => {
+        /* leave the feed as-is on a storage read failure */
+      });
+
+    logDebug("feed rendered", {
       url: location.href,
       page: getPageNumberFromUrl(),
-      detectedListings: total,
-      filteredVisible: visibleCount,
+      knownShops: opportunities.length,
+      hotCount,
+      strongCount,
     });
   }
 
-  function scheduleStyleUpdate() {
+  function scheduleFeedUpdate() {
     if (styleUpdateScheduled) return;
     styleUpdateScheduled = true;
     requestAnimationFrame(() => {
       styleUpdateScheduled = false;
-      applyFiltersToAllKnownCards();
+      renderResultsFeed();
     });
   }
 
   // ---------------------------------------------------------------------
-  // Level 2: optional public-page enrichment, user-initiated only.
-  // Resolves shop total sales, shop age, rating, and reviews count - all
-  // shop-level facts, dedupable across every card from the same shop.
-  // Digital-product detection is intentionally card-level only (see
-  // README): re-checking it via fetch would mean a request for nearly
-  // every physical-goods card, which conflicts with the "don't scrape
-  // aggressively" requirement.
+  // Level 2: optional public-page enrichment, user-initiated only ("Start
+  // Research" / "Refresh Research"). Resolves shop total sales, shop age,
+  // rating, and reviews count - all shop-level facts, dedupable across
+  // every card from the same shop. Digital-product detection is
+  // intentionally card-level only (see README): re-checking it via fetch
+  // would mean a request for nearly every physical-goods card, which
+  // conflicts with the "don't scrape aggressively" requirement.
   // ---------------------------------------------------------------------
 
   function delay(ms, signal) {
@@ -535,15 +617,14 @@
   /**
    * Builds one fetch target per unique shop/listing among currently visible,
    * unresolved cards - never per card. Several cards from the same shop
-   * collapse into a single request, and only the currently-loaded, currently
-   * visible (not hidden by our own filters), not-yet-attempted set is
+   * collapse into a single request, and only the currently-loaded set is
    * considered - never the whole page, never automatically.
    */
   function buildFetchTargets() {
     const targetMap = new Map();
 
     knownCards.forEach((card) => {
-      if (!document.contains(card) || card.style.display === "none") return;
+      if (!document.contains(card)) return;
 
       const meta = cardCache.get(card);
       if (!meta) return;
@@ -645,15 +726,22 @@
       cardCache.set(card, merged);
     });
 
-    scheduleStyleUpdate();
+    scheduleFeedUpdate();
   }
 
-  async function startPublicDataFetch() {
-    if (fetchState.running) return;
+  async function startResearch() {
+    hasStartedResearch = true;
+
+    if (fetchState.running) {
+      fetchState.running = false;
+      if (fetchState.abortController) fetchState.abortController.abort();
+      scheduleFeedUpdate();
+      return;
+    }
 
     const targets = buildFetchTargets();
     if (targets.length === 0) {
-      setFetchProgressText("No visible listings need fetching.");
+      scheduleFeedUpdate(); // nothing to fetch - show whatever's already known
       return;
     }
 
@@ -663,7 +751,7 @@
     fetchState.fetched = 0;
     fetchState.found = 0;
     fetchState.unavailable = 0;
-    updateFetchUI();
+    scheduleFeedUpdate();
 
     // FETCH_CONCURRENCY lanes pull from the same shared queue, each pausing
     // FETCH_DELAY_MS between its own requests - polite pacing even at
@@ -674,7 +762,7 @@
         const target = queue.shift();
         await processFetchTarget(target);
         fetchState.fetched++;
-        updateFetchUI();
+        scheduleFeedUpdate();
         if (fetchState.running && queue.length > 0) {
           await delay(FETCH_DELAY_MS, fetchState.abortController.signal);
         }
@@ -685,118 +773,238 @@
     await Promise.all(lanes);
 
     fetchState.running = false;
-    updateFetchUI();
-  }
-
-  function stopPublicDataFetch() {
-    if (!fetchState.running) return;
-    fetchState.running = false;
-    if (fetchState.abortController) fetchState.abortController.abort();
-    updateFetchUI();
+    scheduleFeedUpdate();
   }
 
   // ---------------------------------------------------------------------
   // Floating panel UI
   // ---------------------------------------------------------------------
 
+  function panelTemplate() {
+    return `
+      <div class="eof-header" id="eof-drag-handle">
+        <span class="eof-title">🔥 Etsy Opportunity Finder</span>
+        <button type="button" class="eof-icon-btn" id="eof-minimize-btn" aria-label="Minimize">&minus;</button>
+      </div>
+      <div class="eof-nav">
+        <button type="button" class="eof-nav-btn" data-view="dashboard" id="eof-nav-dashboard">📊 Dashboard</button>
+        <button type="button" class="eof-nav-btn" data-view="settings" id="eof-nav-settings">⚙️ Settings</button>
+        <button type="button" class="eof-nav-btn" data-view="saved" id="eof-nav-saved">⭐ Saved</button>
+      </div>
+      <div class="eof-body">
+        <div class="eof-view active" id="eof-view-main">
+          <div class="eof-section" id="eof-hero">
+            <h3 class="eof-section-title">Search Analysis</h3>
+            <p class="eof-hint" id="eof-hint">Find new Etsy shops making money fast on this page.</p>
+            <button type="button" class="eof-primary-btn" id="eof-start-btn">🚀 Start Research</button>
+            <div class="eof-progress" id="eof-progress" style="display: none">
+              <div class="eof-progress-label" id="eof-progress-label"></div>
+              <div class="eof-progress-track"><div class="eof-progress-fill" id="eof-progress-bar"></div></div>
+              <div class="eof-progress-count" id="eof-progress-count"></div>
+            </div>
+          </div>
+          <div class="eof-stats-row" id="eof-stats-row" style="display: none">
+            <div class="eof-stat eof-stat-hot"><b id="eof-stat-hot">0</b><span>🔥 Hot</span></div>
+            <div class="eof-stat eof-stat-strong"><b id="eof-stat-strong">0</b><span>🚀 Strong</span></div>
+            <div class="eof-stat eof-stat-avg"><b id="eof-stat-avg-velocity">0</b><span>Avg sales/day</span></div>
+          </div>
+          <div class="eof-results" id="eof-results"></div>
+        </div>
+
+        <div class="eof-view" id="eof-view-settings">
+          <h3 class="eof-section-title">Settings</h3>
+          <fieldset class="eof-fieldset">
+            <legend>Shop age</legend>
+            <label class="eof-radio-row"><input type="radio" name="eof-shop-age" value="all" id="eof-age-all" /><span>Any</span></label>
+            <label class="eof-radio-row"><input type="radio" name="eof-shop-age" value="new" id="eof-age-new" /><span>New</span></label>
+            <label class="eof-radio-row"><input type="radio" name="eof-shop-age" value="1m" id="eof-age-1m" /><span>&lt;1 month</span></label>
+            <label class="eof-radio-row"><input type="radio" name="eof-shop-age" value="3m" id="eof-age-3m" /><span>&lt;3 months</span></label>
+            <label class="eof-radio-row"><input type="radio" name="eof-shop-age" value="6m" id="eof-age-6m" /><span>&lt;6 months</span></label>
+          </fieldset>
+          <div class="eof-field-grid">
+            <label class="eof-field"><span>Min. sales</span><input type="number" min="0" id="eof-min-sales" /></label>
+            <label class="eof-field"><span>Min. reviews</span><input type="number" min="0" id="eof-min-reviews" /></label>
+            <label class="eof-field"><span>Min. rating</span><input type="number" min="1" max="5" step="0.1" id="eof-min-rating" /></label>
+            <label class="eof-field"><span>Min. sales/day</span><input type="number" min="0" step="0.01" id="eof-min-velocity" /></label>
+          </div>
+          <label class="eof-checkbox-row"><input type="checkbox" id="eof-digital-only" /><span>Digital products only</span></label>
+          <label class="eof-checkbox-row"><input type="checkbox" id="eof-hide-unavailable" /><span>Hide shops with unavailable data</span></label>
+          <div class="eof-actions">
+            <button type="button" class="eof-primary-btn" id="eof-apply-btn">Apply</button>
+            <button type="button" class="eof-secondary-btn" id="eof-reset-btn">Reset</button>
+          </div>
+          <label class="eof-checkbox-row eof-debug-row" id="eof-debug-row" style="display: none">
+            <input type="checkbox" id="eof-debug-mode" /><span>Debug mode (console logs)</span>
+          </label>
+          <p class="eof-note">${LIMITATION_NOTE}</p>
+        </div>
+
+        <div class="eof-view" id="eof-view-saved">
+          <h3 class="eof-section-title">Saved shops</h3>
+          <div class="eof-saved-list" id="eof-saved-list"></div>
+        </div>
+      </div>
+    `;
+  }
+
   function createPanel() {
     if (document.getElementById(PANEL_ID)) return; // never create a second panel
 
     const panel = document.createElement("div");
     panel.id = PANEL_ID;
-    panel.innerHTML = `
-      <div class="etsy-filter-header">
-        <span class="etsy-filter-title">Etsy Advanced Filter</span>
-        <button type="button" class="etsy-filter-collapse" aria-label="Collapse panel">&minus;</button>
-      </div>
-      <div class="etsy-filter-body">
-        <fieldset class="etsy-filter-fieldset">
-          <legend>Maximum Shop Age</legend>
-          <label class="etsy-filter-row etsy-filter-radio-row">
-            <input type="radio" name="etsy-filter-shop-age" value="all" id="etsy-filter-age-all" />
-            <span>All</span>
-          </label>
-          <label class="etsy-filter-row etsy-filter-radio-row">
-            <input type="radio" name="etsy-filter-shop-age" value="new" id="etsy-filter-age-new" />
-            <span>New on Etsy</span>
-          </label>
-          <label class="etsy-filter-row etsy-filter-radio-row">
-            <input type="radio" name="etsy-filter-shop-age" value="1m" id="etsy-filter-age-1m" />
-            <span>1 month or newer</span>
-          </label>
-          <label class="etsy-filter-row etsy-filter-radio-row">
-            <input type="radio" name="etsy-filter-shop-age" value="2m" id="etsy-filter-age-2m" />
-            <span>2 months or newer</span>
-          </label>
-          <label class="etsy-filter-row etsy-filter-radio-row">
-            <input type="radio" name="etsy-filter-shop-age" value="3m" id="etsy-filter-age-3m" />
-            <span>3 months or newer</span>
-          </label>
-          <label class="etsy-filter-row etsy-filter-radio-row">
-            <input type="radio" name="etsy-filter-shop-age" value="6m" id="etsy-filter-age-6m" />
-            <span>6 months or newer</span>
-          </label>
-        </fieldset>
-        <label class="etsy-filter-row etsy-filter-checkbox-row">
-          <input type="checkbox" id="etsy-filter-digital-only" />
-          <span>Digital products only</span>
-        </label>
-        <label class="etsy-filter-row">
-          <span>Minimum rating (1-5)</span>
-          <input type="number" min="1" max="5" step="0.1" id="etsy-filter-min-rating" placeholder="e.g. 4.5" />
-        </label>
-        <label class="etsy-filter-row">
-          <span>Minimum reviews</span>
-          <input type="number" min="0" inputmode="numeric" id="etsy-filter-min-reviews" placeholder="e.g. 10" />
-        </label>
-        <label class="etsy-filter-row">
-          <span>Minimum shop total sales</span>
-          <input type="number" min="0" inputmode="numeric" id="etsy-filter-min-shop-sales" placeholder="e.g. 50" />
-        </label>
-        <label class="etsy-filter-row">
-          <span>Minimum sales/day velocity</span>
-          <input type="number" min="0" step="0.01" id="etsy-filter-min-velocity" placeholder="e.g. 1.5" />
-        </label>
-        <label class="etsy-filter-row etsy-filter-checkbox-row">
-          <input type="checkbox" id="etsy-filter-hide-unavailable" />
-          <span>Hide listings with unavailable data</span>
-        </label>
-        <div class="etsy-filter-actions">
-          <button type="button" id="etsy-filter-apply">Apply Filters</button>
-          <button type="button" id="etsy-filter-reset">Reset</button>
-        </div>
-        <div class="etsy-filter-fetch-row">
-          <button type="button" id="etsy-filter-fetch-btn">Fetch public data</button>
-          <div class="etsy-filter-fetch-progress" id="etsy-filter-fetch-progress"></div>
-        </div>
-        <div class="etsy-filter-status" id="etsy-filter-status" role="status"></div>
-        <label class="etsy-filter-row etsy-filter-checkbox-row etsy-filter-debug-row">
-          <input type="checkbox" id="etsy-filter-debug-mode" />
-          <span>Debug mode (console logs)</span>
-        </label>
-        <div class="etsy-filter-note">${LIMITATION_NOTE}</div>
-      </div>
-    `;
-
+    panel.innerHTML = panelTemplate();
     document.body.appendChild(panel);
 
-    panel.querySelector(".etsy-filter-collapse").addEventListener("click", () => {
-      panel.classList.toggle("etsy-filter-collapsed");
+    if (isDevMode) panel.querySelector("#eof-debug-row").style.display = "";
+
+    panel.querySelector("#eof-minimize-btn").addEventListener("click", () => {
+      const minimized = !panel.classList.contains("eof-minimized");
+      setMinimized(panel, minimized);
+      saveSettings({ panelMinimized: minimized });
     });
 
-    panel.querySelector("#etsy-filter-apply").addEventListener("click", onApplyClicked);
-    panel.querySelector("#etsy-filter-reset").addEventListener("click", onResetClicked);
-    panel.querySelector("#etsy-filter-fetch-btn").addEventListener("click", () => {
-      if (fetchState.running) {
-        stopPublicDataFetch();
-      } else {
-        startPublicDataFetch();
-      }
+    panel.querySelector("#eof-nav-dashboard").addEventListener("click", () => {
+      window.open(chrome.runtime.getURL("src/dashboard.html"), "_blank");
     });
-    panel.querySelector("#etsy-filter-debug-mode").addEventListener("change", (event) => {
+    panel.querySelector("#eof-nav-settings").addEventListener("click", () => {
+      setView(currentView === "settings" ? "main" : "settings");
+    });
+    panel.querySelector("#eof-nav-saved").addEventListener("click", () => {
+      setView(currentView === "saved" ? "main" : "saved");
+    });
+
+    panel.querySelector("#eof-start-btn").addEventListener("click", startResearch);
+    panel.querySelector("#eof-apply-btn").addEventListener("click", onApplyClicked);
+    panel.querySelector("#eof-reset-btn").addEventListener("click", onResetClicked);
+    panel.querySelector("#eof-debug-mode").addEventListener("change", (event) => {
       currentSettings = { ...currentSettings, debugMode: event.target.checked };
       saveSettings({ debugMode: event.target.checked });
     });
+
+    makeDraggable(panel, panel.querySelector("#eof-drag-handle"));
+  }
+
+  function setView(view) {
+    currentView = view;
+    const panel = document.getElementById(PANEL_ID);
+    if (!panel) return;
+
+    ["main", "settings", "saved"].forEach((v) => {
+      const el = panel.querySelector(`#eof-view-${v}`);
+      if (el) el.classList.toggle("active", v === view);
+    });
+    panel.querySelectorAll(".eof-nav-btn").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.view === view && view !== "dashboard");
+    });
+
+    if (view === "saved") renderSavedView();
+  }
+
+  function renderSavedView() {
+    const panel = document.getElementById(PANEL_ID);
+    if (!panel) return;
+    const list = panel.querySelector("#eof-saved-list");
+    list.innerHTML = '<div class="eof-empty">Loading…</div>';
+
+    getSavedItems()
+      .then((saved) => {
+        const shops = Object.values(saved).filter((entry) => entry.type === "shop");
+        list.innerHTML = "";
+        if (shops.length === 0) {
+          list.innerHTML = '<div class="eof-empty">No saved shops yet. Save one from your research results.</div>';
+          return;
+        }
+        shops.forEach((entry) => {
+          const shop = entry.data || {};
+          const row = document.createElement("div");
+          row.className = "eof-saved-row";
+          row.innerHTML = `
+            <div class="eof-saved-info">
+              <div class="eof-saved-shop">${escapeHtml(shop.shopName || entry.id)}</div>
+              <div class="eof-saved-meta">${
+                shop.shopTotalSales !== null && shop.shopTotalSales !== undefined
+                  ? `${shop.shopTotalSales.toLocaleString()} sales`
+                  : ""
+              }</div>
+            </div>
+            <div class="eof-saved-actions">
+              <button type="button" class="eof-btn eof-open-btn">Open</button>
+              <button type="button" class="eof-btn eof-remove-btn">Remove</button>
+            </div>
+          `;
+          row.querySelector(".eof-open-btn").addEventListener("click", () => {
+            window.open(entry.id, "_blank", "noopener");
+          });
+          row.querySelector(".eof-remove-btn").addEventListener("click", () => {
+            removeSavedItem("shop", entry.id).then(renderSavedView);
+          });
+          list.appendChild(row);
+        });
+      })
+      .catch(() => {
+        list.innerHTML = '<div class="eof-empty">Couldn\'t load saved shops.</div>';
+      });
+  }
+
+  function setMinimized(panel, minimized) {
+    panel.classList.toggle("eof-minimized", minimized);
+    const btn = panel.querySelector("#eof-minimize-btn");
+    if (btn) btn.innerHTML = minimized ? "&#9633;" : "&minus;";
+  }
+
+  /**
+   * Basic pointer-based drag on the header, constrained to the viewport.
+   * Position is persisted (debounced to drag-end only, not per pixel) so
+   * the panel reopens where the user left it.
+   */
+  function makeDraggable(panel, handle) {
+    let dragging = false;
+    let startX = 0;
+    let startY = 0;
+    let startTop = 0;
+    let startLeft = 0;
+
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.target.closest("button")) return; // don't drag when clicking the minimize button
+      dragging = true;
+      const rect = panel.getBoundingClientRect();
+      startX = event.clientX;
+      startY = event.clientY;
+      startTop = rect.top;
+      startLeft = rect.left;
+      panel.style.right = "auto";
+      panel.style.top = `${startTop}px`;
+      panel.style.left = `${startLeft}px`;
+      if (handle.setPointerCapture) handle.setPointerCapture(event.pointerId);
+    });
+
+    handle.addEventListener("pointermove", (event) => {
+      if (!dragging) return;
+      const dx = event.clientX - startX;
+      const dy = event.clientY - startY;
+      const maxLeft = Math.max(0, window.innerWidth - panel.offsetWidth);
+      const maxTop = Math.max(0, window.innerHeight - 40);
+      panel.style.left = `${Math.min(Math.max(0, startLeft + dx), maxLeft)}px`;
+      panel.style.top = `${Math.min(Math.max(0, startTop + dy), maxTop)}px`;
+    });
+
+    const endDrag = () => {
+      if (!dragging) return;
+      dragging = false;
+      const rect = panel.getBoundingClientRect();
+      saveSettings({ panelPosition: { top: rect.top, left: rect.left } });
+    };
+    handle.addEventListener("pointerup", endDrag);
+    handle.addEventListener("pointercancel", endDrag);
+  }
+
+  function applyPanelPosition(panel) {
+    const pos = currentSettings.panelPosition;
+    if (pos && typeof pos.top === "number" && typeof pos.left === "number") {
+      panel.style.top = `${pos.top}px`;
+      panel.style.left = `${pos.left}px`;
+      panel.style.right = "auto";
+    }
   }
 
   function syncPanelFromSettings() {
@@ -804,39 +1012,43 @@
     if (!panel) return;
 
     const shopAgeValue = currentSettings.shopAgeFilter || "all";
-    const radio = panel.querySelector(`input[name="etsy-filter-shop-age"][value="${shopAgeValue}"]`);
+    const radio = panel.querySelector(`input[name="eof-shop-age"][value="${shopAgeValue}"]`);
     if (radio) radio.checked = true;
+    else panel.querySelector("#eof-age-all").checked = true; // e.g. legacy "2m" value, no longer offered here
 
-    panel.querySelector("#etsy-filter-digital-only").checked = !!currentSettings.digitalOnly;
-    panel.querySelector("#etsy-filter-min-rating").value = currentSettings.minRating || "";
-    panel.querySelector("#etsy-filter-min-reviews").value = currentSettings.minReviews || "";
-    panel.querySelector("#etsy-filter-min-shop-sales").value = currentSettings.minShopTotalSales || "";
-    panel.querySelector("#etsy-filter-min-velocity").value = currentSettings.minSalesVelocity || "";
-    panel.querySelector("#etsy-filter-hide-unavailable").checked = !!currentSettings.hideUnavailableData;
-    panel.querySelector("#etsy-filter-debug-mode").checked = !!currentSettings.debugMode;
-    panel.classList.toggle("etsy-filter-disabled", !currentSettings.enabled);
+    panel.querySelector("#eof-digital-only").checked = !!currentSettings.digitalOnly;
+    panel.querySelector("#eof-min-sales").value = currentSettings.minShopTotalSales || "";
+    panel.querySelector("#eof-min-reviews").value = currentSettings.minReviews || "";
+    panel.querySelector("#eof-min-rating").value = currentSettings.minRating || "";
+    panel.querySelector("#eof-min-velocity").value = currentSettings.minSalesVelocity || "";
+    panel.querySelector("#eof-hide-unavailable").checked = !!currentSettings.hideUnavailableData;
+    panel.querySelector("#eof-debug-mode").checked = !!currentSettings.debugMode;
+
+    applyPanelPosition(panel);
+    setMinimized(panel, !!currentSettings.panelMinimized);
   }
 
-  function readPanelValues() {
+  function readSettingsFromPanel() {
     const panel = document.getElementById(PANEL_ID);
     if (!panel) return {};
-    const checkedAge = panel.querySelector('input[name="etsy-filter-shop-age"]:checked');
+    const checkedAge = panel.querySelector('input[name="eof-shop-age"]:checked');
     return {
       shopAgeFilter: checkedAge ? checkedAge.value : "all",
-      digitalOnly: panel.querySelector("#etsy-filter-digital-only").checked,
-      minRating: panel.querySelector("#etsy-filter-min-rating").value.trim(),
-      minReviews: panel.querySelector("#etsy-filter-min-reviews").value.trim(),
-      minShopTotalSales: panel.querySelector("#etsy-filter-min-shop-sales").value.trim(),
-      minSalesVelocity: panel.querySelector("#etsy-filter-min-velocity").value.trim(),
-      hideUnavailableData: panel.querySelector("#etsy-filter-hide-unavailable").checked,
+      digitalOnly: panel.querySelector("#eof-digital-only").checked,
+      minShopTotalSales: panel.querySelector("#eof-min-sales").value.trim(),
+      minReviews: panel.querySelector("#eof-min-reviews").value.trim(),
+      minRating: panel.querySelector("#eof-min-rating").value.trim(),
+      minSalesVelocity: panel.querySelector("#eof-min-velocity").value.trim(),
+      hideUnavailableData: panel.querySelector("#eof-hide-unavailable").checked,
     };
   }
 
   function onApplyClicked() {
-    const values = readPanelValues();
+    const values = readSettingsFromPanel();
     currentSettings = { ...currentSettings, ...values };
     saveSettings(values);
-    scheduleStyleUpdate();
+    setView("main");
+    scheduleFeedUpdate();
   }
 
   function onResetClicked() {
@@ -852,39 +1064,7 @@
     currentSettings = { ...currentSettings, ...cleared };
     syncPanelFromSettings();
     saveSettings(cleared);
-    scheduleStyleUpdate();
-  }
-
-  function updateStatus(info) {
-    const statusEl = document.getElementById("etsy-filter-status");
-    if (!statusEl) return;
-
-    if (!currentSettings.enabled) {
-      statusEl.textContent = "Extension disabled";
-      return;
-    }
-    if (!info) {
-      statusEl.textContent = "";
-      return;
-    }
-    statusEl.textContent = `${info.visible} of ${info.total} listings visible`;
-  }
-
-  function setFetchProgressText(text) {
-    const progressEl = document.getElementById("etsy-filter-fetch-progress");
-    if (progressEl) progressEl.textContent = text;
-  }
-
-  function updateFetchUI() {
-    const btn = document.getElementById("etsy-filter-fetch-btn");
-    if (btn) btn.textContent = fetchState.running ? "Stop fetching" : "Fetch public data";
-
-    if (fetchState.total > 0) {
-      setFetchProgressText(
-        `Fetched ${fetchState.fetched} / ${fetchState.total} visible listings — ` +
-          `Data found: ${fetchState.found}, Unavailable: ${fetchState.unavailable}`
-      );
-    }
+    scheduleFeedUpdate();
   }
 
   // ---------------------------------------------------------------------
@@ -971,7 +1151,8 @@
     //   - inMemoryShopDirectory / attemptedFetchKeys: shop/listing facts
     //     already learned remain valid on other pages of the same search and
     //     should never be re-fetched.
-    //   - currentSettings: the user's filters must survive page navigation.
+    //   - currentSettings / hasStartedResearch: the user's filters and
+    //     research state must survive page navigation.
     knownCards.clear();
     pendingCards.clear();
   }
@@ -1081,7 +1262,7 @@
     onSettingsChanged((newSettings) => {
       currentSettings = newSettings;
       syncPanelFromSettings();
-      scheduleStyleUpdate();
+      scheduleFeedUpdate();
     });
   }
 
